@@ -483,6 +483,53 @@ function requestTimeoutMs(baseMs = HANDLER_TIMEOUT_MS) {
   return proxyPool?.canRotateSessions ? Math.max(baseMs, 180000) : baseMs;
 }
 
+const RESOURCE_BLOCK_ALIASES = new Map([
+  ['image', 'image'],
+  ['images', 'image'],
+  ['img', 'image'],
+  ['media', 'media'],
+  ['audio', 'media'],
+  ['video', 'media'],
+  ['font', 'font'],
+  ['fonts', 'font'],
+]);
+
+function normalizeBlockedResourceTypes(value) {
+  const raw = Array.isArray(value)
+    ? value
+    : typeof value === 'string'
+      ? value.split(/[\s,]+/)
+      : [];
+  const blocked = [];
+  const seen = new Set();
+  for (const item of raw) {
+    const normalized = RESOURCE_BLOCK_ALIASES.get(String(item).trim().toLowerCase());
+    if (normalized && !seen.has(normalized)) {
+      seen.add(normalized);
+      blocked.push(normalized);
+    }
+  }
+  return blocked;
+}
+
+async function applyResourceBlocking(page, blockedResourceTypes) {
+  const blocked = new Set(normalizeBlockedResourceTypes(blockedResourceTypes));
+  if (blocked.size === 0) return [];
+  await page.route('**/*', async (route) => {
+    const resourceType = route.request().resourceType();
+    if (blocked.has(resourceType)) {
+      try {
+        await route.abort();
+      } catch (_) {}
+      return;
+    }
+    try {
+      await route.continue();
+    } catch (_) {}
+  });
+  return Array.from(blocked);
+}
+
 const userConcurrency = new Map();
 
 async function withUserLimit(userId, operation) {
@@ -2562,7 +2609,8 @@ app.post('/pressure/cleanup', authMiddleware(), async (req, res) => {
  */
 app.post('/tabs', async (req, res) => {
   try {
-    const { userId, sessionKey, listItemId, url, trace } = req.body;
+    const { userId, sessionKey, listItemId, url, trace, blockedResourceTypes } = req.body;
+    const blockedTypes = normalizeBlockedResourceTypes(blockedResourceTypes);
     // Accept both sessionKey (preferred) and listItemId (legacy) for backward compatibility
     const resolvedSessionKey = sessionKey || listItemId;
     if (!userId || !resolvedSessionKey) {
@@ -2609,6 +2657,9 @@ app.post('/tabs', async (req, res) => {
       const group = getTabGroup(session, resolvedSessionKey);
       
       const page = await session.context.newPage();
+      if (blockedTypes.length > 0) {
+        await applyResourceBlocking(page, blockedTypes);
+      }
       const tabId = fly.makeTabId();
       let tabState = createTabState(page);
       attachDownloadListener(tabState, tabId, log, pluginEvents, userId);
@@ -2636,6 +2687,9 @@ app.post('/tabs', async (req, res) => {
             session = await getSession(userId, { trace: !!trace });
             const retryGroup = getTabGroup(session, resolvedSessionKey);
             const retryPage = await session.context.newPage();
+            if (blockedTypes.length > 0) {
+              await applyResourceBlocking(retryPage, blockedTypes);
+            }
             tabState = createTabState(retryPage);
             tabState.lastRequestedUrl = url;
             attachDownloadListener(tabState, tabId, log, pluginEvents, userId);
@@ -2651,8 +2705,8 @@ app.post('/tabs', async (req, res) => {
       }
       
       pluginEvents.emit('tab:created', { userId, tabId, page, url: page.url() });
-      log('info', 'tab created', { reqId: req.reqId, tabId, userId, sessionKey: resolvedSessionKey, url: page.url() });
-      return { tabId, url: page.url() };
+      log('info', 'tab created', { reqId: req.reqId, tabId, userId, sessionKey: resolvedSessionKey, url: page.url(), blockedResourceTypes: blockedTypes.join(',') || null });
+      return { tabId, url: page.url(), blockedResourceTypes: blockedTypes };
     })(), requestTimeoutMs(), 'tab create');
 
     res.json(result);
