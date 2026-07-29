@@ -35,7 +35,15 @@ import { cleanupOrphanedTempFiles, cleanupStaleFirefoxProfiles } from './lib/tmp
 import { coalesceInflight } from './lib/inflight.js';
 import { createPageWithSessionRecovery } from './lib/new-page-recovery.js';
 import { applyResourceBlocking, normalizeBlockedResourceTypes } from './lib/resource-blocking.js';
-import { createReporter, createTabHealthTracker, collectResourceSnapshot, classifyProxyError, browserProcessTreeRssMb, browserProcessNameRssMb } from './lib/reporter.js';
+import {
+  createReporter,
+  createTabHealthTracker,
+  collectResourceSnapshot,
+  classifyProxyError,
+  browserProcessTreePssMb,
+  browserDescendantTreePssMb,
+  evaluateBrowserMemoryPressure,
+} from './lib/reporter.js';
 import { mountDocs } from './lib/openapi.js';
 import { initSentry, captureException as sentryCaptureException, setupExpressErrorHandler as setupSentryErrorHandler, flush as sentryFlush } from './lib/sentry.js';
 import { prepareExternalCamoufoxExecutable } from './lib/camoufox-executable.js';
@@ -473,6 +481,7 @@ let browser = null;
 let _lastBrowserPid = null; // Track PID independently for force-kill after close
 let _browserClosePromise = null; // Shared promise for concurrent close serialization
 let _lastBrowserRestartAt = 0; // Timestamp of last browser relaunch (for stale tab detection)
+let _browserMemoryOverThresholdSamples = 0;
 // userId -> { context, tabGroups: Map<sessionKey, Map<tabId, TabState>>, lastAccess }
 // TabState = { page, refs: Map<refId, {role, name, nth}>, visitedUrls: Set, downloads: Array, toolCalls: number }
 // Note: sessionKey was previously called listItemId - both are accepted for backward compatibility
@@ -659,10 +668,16 @@ let browserIdleTimer = null;
 let browserLaunchPromise = null;
 let browserWarmRetryTimer = null;
 
-// Tracks why the browser was last stopped. Intentional reasons (idle_shutdown, admin_stop)
-// keep /health returning 200. Unexpected reasons trigger 503 + warm retry.
+// Tracks why the browser was last stopped. Intentional idle/admin stops and
+// managed memory-pressure recycles keep /health returning 200. Unexpected
+// reasons trigger 503 + warm retry.
 let _lastBrowserStopReason = null;
-const INTENTIONAL_STOP_REASONS = new Set(['idle_shutdown', 'admin_stop']);
+const INTENTIONAL_STOP_REASONS = new Set([
+  'idle_shutdown',
+  'admin_stop',
+  'browser_rss_pressure',
+  'memory_pressure',
+]);
 
 function scheduleBrowserIdleShutdown() {
   if (browserIdleTimer || sessions.size > 0 || !browser) return;
@@ -891,6 +906,7 @@ async function _closeBrowserFullyImpl(reason) {
   // Null the ref so new requests don't use a dying browser
   browser = null;
   _lastBrowserPid = null;
+  _browserMemoryOverThresholdSamples = 0;
 
   // Close through Playwright (sends CDP Browser.close, then SIGKILL process group)
   let closeTimer;
@@ -1101,6 +1117,7 @@ async function launchBrowserInstance() {
       browser = candidateBrowser; // publish AFTER PID is captured
       _lastBrowserStopReason = null; // clear — browser is healthy
       _lastBrowserRestartAt = Date.now();
+      _browserMemoryOverThresholdSamples = 0;
       attachBrowserCleanup(browser, localVirtualDisplay);
       pluginEvents.emit('browser:launched', { browser, display: vdDisplay });
 
@@ -5282,24 +5299,33 @@ setInterval(() => {
   if (reaped > 0) log('warn', 'orphan page reaper closed leaked pages', { reaped });
 }, 60_000);
 
-// Idle memory pressure restart -- when all sessions are gone, kill the browser
-// process immediately if either Node native memory or the Camoufox process tree
-// is large. This prevents idle Firefox children from holding most of the VM RAM
-// while Node reports zero sessions/tabs.
+// Idle memory pressure restart -- when all sessions are gone, close an owned
+// Camoufox tree after a post-launch grace period and repeated high-PSS samples.
+// Never match host-global Firefox/Zen process names: unrelated desktop browsers
+// must not influence this service's recycle decision.
 setInterval(() => {
   if (sessions.size > 0 || !browser) return;
   const mem = process.memoryUsage();
   const nativeMemMb = Math.round((mem.rss - mem.heapUsed) / 1048576);
-  const browserRssMb = browserProcessTreeRssMb(_browserPid()) ?? browserProcessNameRssMb();
+  const browserPssMb = browserProcessTreePssMb(_browserPid())
+    ?? browserDescendantTreePssMb(process.pid);
+  const pressure = evaluateBrowserMemoryPressure({
+    browserMemoryMb: browserPssMb,
+    thresholdMb: CONFIG.browserRssRestartThresholdMb,
+    launchedAt: _lastBrowserRestartAt,
+    consecutiveOverThreshold: _browserMemoryOverThresholdSamples,
+  });
+  _browserMemoryOverThresholdSamples = pressure.consecutiveOverThreshold;
 
-  if (browserRssMb !== null && browserRssMb >= CONFIG.browserRssRestartThresholdMb) {
-    log('warn', 'browser rss pressure, restarting browser', {
-      browserRssMb,
+  if (pressure.action === 'restart') {
+    log('warn', 'browser memory pressure, restarting browser', {
+      browserPssMb,
       thresholdMb: CONFIG.browserRssRestartThresholdMb,
+      samples: 2,
     });
     browserRestartsTotal.labels('browser_rss_pressure').inc();
     closeBrowserFully('browser_rss_pressure').catch((err) => {
-      log('error', 'browser rss pressure browser close failed', { error: err.message });
+      log('error', 'browser memory pressure browser close failed', { error: err.message });
     });
     return;
   }
