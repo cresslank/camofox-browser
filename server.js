@@ -64,8 +64,8 @@ import {
   browserCloseCompleted,
   browserCloseStarted,
   browserHealthDecision,
+  browserWarmRetryDecision,
   previousBrowserCleanupFailure,
-  shouldScheduleBrowserWarmRetry,
 } from './lib/browser-health.js';
 import {
   safePageUrl, urlDomain, hashIdentifier,
@@ -694,9 +694,13 @@ let browserLaunchPromise = null;
 let browserLaunchTask = null;
 const browserLaunchFence = createBrowserLaunchFence();
 let browserWarmRetryTimer = null;
+let browserWarmRetryDeferred = false;
+let browserWarmRetryDeferredDelayMs = 5000;
 let shuttingDown = false;
 
 function cancelBrowserWarmRetry() {
+  browserWarmRetryDeferred = false;
+  browserWarmRetryDeferredDelayMs = 5000;
   if (browserWarmRetryTimer === null) return;
   clearTimeout(browserWarmRetryTimer);
   browserWarmRetryTimer = null;
@@ -746,12 +750,20 @@ function camoufoxInstallRemediation() {
 }
 
 function scheduleBrowserWarmRetry(delayMs = 5000) {
-  if (!shouldScheduleBrowserWarmRetry({
+  const decision = browserWarmRetryDecision({
     timerActive: browserWarmRetryTimer !== null,
     browserConnected: browser?.isConnected?.() ?? false,
     launchPending: browserLaunchPromise !== null || browserLaunchTask !== null,
     shuttingDown,
-  })) return;
+  });
+  if (decision === 'suppress') return;
+  if (decision === 'defer') {
+    browserWarmRetryDeferred = true;
+    browserWarmRetryDeferredDelayMs = delayMs;
+    return;
+  }
+  browserWarmRetryDeferred = false;
+  browserWarmRetryDeferredDelayMs = 5000;
   browserWarmRetryTimer = setTimeout(async () => {
     browserWarmRetryTimer = null;
     try {
@@ -770,6 +782,13 @@ function scheduleBrowserWarmRetry(delayMs = 5000) {
       scheduleBrowserWarmRetry(Math.min(delayMs * 2, 30000));
     }
   }, delayMs);
+}
+
+function flushDeferredBrowserWarmRetry() {
+  if (!browserWarmRetryDeferred || browserLaunchTask || browserLaunchPromise) return;
+  const delayMs = browserWarmRetryDeferredDelayMs;
+  browserWarmRetryDeferred = false;
+  scheduleBrowserWarmRetry(delayMs);
 }
 
 // --- Browser health tracking ---
@@ -925,20 +944,27 @@ async function closeBrowserFully(reason) {
   const pendingLaunch = browserLaunchTask || browserLaunchPromise;
 
   const closePromise = (async () => {
-    await cancelPendingBrowserLaunch(browserLaunchFence, pendingLaunch);
+    const launchCleanup = await cancelPendingBrowserLaunch(browserLaunchFence, pendingLaunch);
     try {
       const result = await _closeBrowserFullyImpl(reason);
-      const completed = browserCloseCompleted(reason, result);
+      const combinedResult = launchCleanup.cleanupVerified
+        ? result
+        : {
+            ...result,
+            cleanupVerified: false,
+            error: launchCleanup.error || result.error || 'browser launch cleanup not verified',
+          };
+      const completed = browserCloseCompleted(reason, combinedResult);
       _browserCloseState = completed.closeState;
       _lastBrowserStopReason = completed.lastStopReason;
       if (_browserCloseState.failed) {
         log('error', 'browser cleanup could not be verified', {
           reason,
-          error: result.error || null,
-          survivors: result.survivors,
+          error: combinedResult.error || null,
+          survivors: combinedResult.survivors,
         });
       }
-      return result;
+      return combinedResult;
     } catch (err) {
       const completed = browserCloseCompleted(reason, { cleanupVerified: false, error: err.message });
       _browserCloseState = completed.closeState;
@@ -992,10 +1018,7 @@ async function _closeBrowserFullyImpl(reason) {
     clearTimeout(closeTimer);
   }
 
-  // Force-kill only survivors captured before this close began.
-  if (pid) {
-    await _forceKillProcessTree(pid, reason);
-  }
+  // Force-kill only identity-stable survivors captured before this close began.
   const survivorCleanup = await _forceKillBrowserProcesses(reason, ownedBrowserProcesses);
   const cleanupVerified = ownershipCapture.indeterminate.length === 0 && (
     ownedBrowserProcesses.length > 0
@@ -1047,40 +1070,6 @@ async function _closeBrowserFullyImpl(reason) {
     error: cleanupError,
     survivors: survivorCleanup.survivors,
   };
-}
-
-/**
- * Force-kill a browser process tree by PID. On Linux, kills the process group
- * (SIGKILL -pid). Orphan cleanup is deliberately left to the ownership
- * snapshot captured before browser.close(), below.
- */
-async function _forceKillProcessTree(pid, reason) {
-  if (!pid || pid <= 1) return;
-
-  // Kill the specific browser process first (positive PID = single process)
-  try {
-    process.kill(pid, 'SIGKILL');
-    log('info', 'sent SIGKILL to browser process', { pid, reason });
-  } catch (err) {
-    if (err.code !== 'ESRCH') {
-      log('warn', 'failed to kill browser process', { pid, error: err.message });
-    }
-  }
-
-  // Then try the process group (Playwright launches with detached:true on Linux,
-  // making the browser a process group leader)
-  try {
-    process.kill(-pid, 'SIGKILL');
-  } catch {
-    // ESRCH = group doesn't exist (browser wasn't a group leader), which is fine
-  }
-
-  // Give the group kill time to complete. Any descendants that escaped it are
-  // selected later only from the pre-close, starttime-safe ownership snapshot.
-  await new Promise(r => setTimeout(r, 200));
-
-  // Give the OS a moment to reclaim resources
-  await new Promise(r => setTimeout(r, 300));
 }
 
 async function _forceKillBrowserProcesses(reason, ownedBrowserProcesses = []) {
@@ -1142,6 +1131,41 @@ function _countOpenFds() {
 
 function _countActiveHandles() {
   try { return process._getActiveHandles().length; } catch { return null; }
+}
+
+async function closeLaunchCandidate(candidateBrowser, reason) {
+  if (!candidateBrowser) return { cleanupVerified: true, error: null };
+  const ownershipCapture = captureOwnedBrowserProcesses(process.pid);
+  const ownedBrowserProcesses = ownershipCapture.processes;
+  let closeTimer;
+  let closeError = null;
+  try {
+    await Promise.race([
+      candidateBrowser.close(),
+      new Promise((_, reject) => {
+        closeTimer = setTimeout(
+          () => reject(new Error('launch candidate close timeout')),
+          5000,
+        );
+      }),
+    ]);
+  } catch (error) {
+    closeError = error;
+  } finally {
+    clearTimeout(closeTimer);
+  }
+
+  if (!closeError) return { cleanupVerified: true, error: null };
+
+  const survivorCleanup = await _forceKillBrowserProcesses(reason, ownedBrowserProcesses);
+  const cleanupVerified = ownershipCapture.indeterminate.length === 0
+    && ownedBrowserProcesses.length > 0
+    && survivorCleanup.verified
+    && survivorCleanup.survivors.length === 0;
+  return {
+    cleanupVerified,
+    error: cleanupVerified ? null : closeError.message,
+  };
 }
 
 async function launchBrowserInstance(launchToken) {
@@ -1227,7 +1251,13 @@ async function launchBrowserInstance(launchToken) {
             url: probe.url,
           });
           if (attempt < maxAttempts) {
-            await candidateBrowser.close().catch(() => {});
+            const cleanup = await closeLaunchCandidate(candidateBrowser, 'launch_probe_retry');
+            if (!cleanup.cleanupVerified) {
+              const cleanupError = new Error(`launch candidate cleanup not verified: ${cleanup.error}`);
+              cleanupError.cleanupVerified = false;
+              throw cleanupError;
+            }
+            candidateBrowser = null;
             if (localVirtualDisplay) localVirtualDisplay.kill();
             continue;
           }
@@ -1269,8 +1299,13 @@ async function launchBrowserInstance(launchToken) {
         error: err.message,
         proxySession: launchProxy?.sessionId || null,
       });
-      await candidateBrowser?.close().catch(() => {});
+      const cleanup = await closeLaunchCandidate(candidateBrowser, 'launch_failure');
+      err.cleanupVerified = cleanup.cleanupVerified;
       if (localVirtualDisplay) localVirtualDisplay.kill();
+      if (!cleanup.cleanupVerified) {
+        err.message = `${err.message}; launch candidate cleanup not verified: ${cleanup.error}`;
+        throw err;
+      }
       if (err.code === 'BROWSER_LAUNCH_CANCELLED') throw err;
     }
   }
@@ -1303,27 +1338,44 @@ async function ensureBrowser() {
   }
   if (browser) return browser;
   if (browserLaunchPromise) return browserLaunchPromise;
-  if (browserLaunchTask) return browserLaunchTask;
+  if (browserLaunchTask) throw new Error('browser launch cleanup is still in progress');
   const launchTimeoutMs = proxyPool?.launchTimeoutMs ?? 60000;
   const launchToken = browserLaunchFence.capture();
   let launchTimer;
   const launchTask = launchBrowserInstance(launchToken);
   browserLaunchTask = launchTask;
-  launchTask.finally(() => {
+  launchTask.catch((err) => {
+    if (err?.cleanupVerified === false) {
+      cancelBrowserWarmRetry();
+      const completed = browserCloseCompleted('launch_cleanup_failed', {
+        cleanupVerified: false,
+        error: err.message,
+      });
+      _browserCloseState = completed.closeState;
+      _lastBrowserStopReason = completed.lastStopReason;
+    }
+  }).finally(() => {
     if (browserLaunchTask === launchTask) browserLaunchTask = null;
+    flushDeferredBrowserWarmRetry();
   }).catch(() => {});
 
   const publicLaunchPromise = Promise.race([
     launchTask,
     new Promise((_, reject) => {
-      launchTimer = setTimeout(() => reject(new Error(`Browser launch timeout (${Math.round(launchTimeoutMs / 1000)}s)`)), launchTimeoutMs);
+      launchTimer = setTimeout(() => {
+        const error = new Error(`Browser launch timeout (${Math.round(launchTimeoutMs / 1000)}s)`);
+        error.code = 'BROWSER_LAUNCH_TIMEOUT';
+        reject(error);
+      }, launchTimeoutMs);
     }),
   ]).catch((err) => {
     if (browserLaunchFence.isCurrent(launchToken)) browserLaunchFence.cancel();
+    if (err?.code === 'BROWSER_LAUNCH_TIMEOUT') scheduleBrowserWarmRetry();
     throw err;
   }).finally(() => {
     clearTimeout(launchTimer);
     if (browserLaunchPromise === publicLaunchPromise) browserLaunchPromise = null;
+    flushDeferredBrowserWarmRetry();
   });
   browserLaunchPromise = publicLaunchPromise;
   return publicLaunchPromise;
@@ -6647,6 +6699,10 @@ process.on('unhandledRejection', (reason) => {
 });
 
 // Graceful shutdown
+const SHUTDOWN_WATCHDOG_MS = 30000;
+const SHUTDOWN_PLUGIN_TIMEOUT_MS = 5000;
+const SHUTDOWN_SESSION_TIMEOUT_MS = 5000;
+
 async function gracefulShutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
@@ -6660,24 +6716,38 @@ async function gracefulShutdown(signal) {
   const forceTimeout = setTimeout(() => {
     log('error', 'shutdown timed out, forcing exit');
     process.exit(1);
-  }, 10000);
+  }, SHUTDOWN_WATCHDOG_MS);
   forceTimeout.unref();
 
   server.close();
   stopMemoryReporter();
+  let shutdownPhaseFailed = false;
 
-  await pluginEvents.emitAsync('server:shutdown', { signal }).catch((err) => {
-    log('error', 'server:shutdown listener failed', { error: err.message });
+  await withTimeout(
+    pluginEvents.emitAsync('server:shutdown', { signal }),
+    SHUTDOWN_PLUGIN_TIMEOUT_MS,
+    'server:shutdown listeners',
+  ).catch((err) => {
+    shutdownPhaseFailed = true;
+    log('error', 'server:shutdown listener failed or timed out', { error: err.message });
   });
 
-  await closeAllSessions(`shutdown:${signal}`, {
-    clearDownloads: false,
-    clearLocks: false,
+  await withTimeout(
+    closeAllSessions(`shutdown:${signal}`, {
+      clearDownloads: false,
+      clearLocks: false,
+    }),
+    SHUTDOWN_SESSION_TIMEOUT_MS,
+    'shutdown session cleanup',
+  ).catch((err) => {
+    shutdownPhaseFailed = true;
+    log('error', 'shutdown session cleanup failed or timed out', { error: err.message });
   });
 
   const closeResult = await closeBrowserFully(`shutdown:${signal}`);
   await sentryFlush(2000);
-  process.exit(browserCleanupExitCode(closeResult));
+  const cleanupExitCode = browserCleanupExitCode(closeResult);
+  process.exit(shutdownPhaseFailed ? 1 : cleanupExitCode);
 }
 
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));

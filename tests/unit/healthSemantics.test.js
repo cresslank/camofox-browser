@@ -4,6 +4,7 @@ import {
   browserCloseCompleted,
   browserCloseStarted,
   browserHealthDecision,
+  browserWarmRetryDecision,
   isIntentionalBrowserStop,
   previousBrowserCleanupFailure,
   shouldScheduleBrowserWarmRetry,
@@ -75,6 +76,9 @@ describe('browser health classification', () => {
     expect(shouldScheduleBrowserWarmRetry({ browserConnected: true })).toBe(false);
     expect(shouldScheduleBrowserWarmRetry({ timerActive: true })).toBe(false);
     expect(shouldScheduleBrowserWarmRetry({ launchPending: true })).toBe(false);
+    expect(browserWarmRetryDecision({ launchPending: true })).toBe('defer');
+    expect(browserWarmRetryDecision({ browserConnected: false })).toBe('schedule');
+    expect(browserWarmRetryDecision({ browserConnected: true })).toBe('suppress');
     expect(shouldScheduleBrowserWarmRetry({ shuttingDown: true })).toBe(false);
   });
 
