@@ -41,7 +41,7 @@ import {
   collectResourceSnapshot,
   classifyProxyError,
   browserProcessTreePssMb,
-  browserDescendantTreePssMb,
+  browserOwnedProcessPssMb,
   evaluateBrowserMemoryPressure,
 } from './lib/reporter.js';
 import { mountDocs } from './lib/openapi.js';
@@ -5308,7 +5308,7 @@ setInterval(() => {
   const mem = process.memoryUsage();
   const nativeMemMb = Math.round((mem.rss - mem.heapUsed) / 1048576);
   const browserPssMb = browserProcessTreePssMb(_browserPid())
-    ?? browserDescendantTreePssMb(process.pid);
+    ?? browserOwnedProcessPssMb(process.pid);
   const pressure = evaluateBrowserMemoryPressure({
     browserMemoryMb: browserPssMb,
     thresholdMb: CONFIG.browserRssRestartThresholdMb,
