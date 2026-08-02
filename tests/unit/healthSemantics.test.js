@@ -75,6 +75,7 @@ describe('browser health classification', () => {
     expect(shouldScheduleBrowserWarmRetry({ browserConnected: true })).toBe(false);
     expect(shouldScheduleBrowserWarmRetry({ timerActive: true })).toBe(false);
     expect(shouldScheduleBrowserWarmRetry({ launchPending: true })).toBe(false);
+    expect(shouldScheduleBrowserWarmRetry({ shuttingDown: true })).toBe(false);
   });
 
   test('retains a failed cleanup across a repeated no-op close', () => {

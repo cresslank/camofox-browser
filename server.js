@@ -694,6 +694,13 @@ let browserLaunchPromise = null;
 let browserLaunchTask = null;
 const browserLaunchFence = createBrowserLaunchFence();
 let browserWarmRetryTimer = null;
+let shuttingDown = false;
+
+function cancelBrowserWarmRetry() {
+  if (browserWarmRetryTimer === null) return;
+  clearTimeout(browserWarmRetryTimer);
+  browserWarmRetryTimer = null;
+}
 
 // Tracks the last completed browser stop. In-progress and failed cleanup are
 // tracked separately so /health cannot report success before recycle completion.
@@ -743,6 +750,7 @@ function scheduleBrowserWarmRetry(delayMs = 5000) {
     timerActive: browserWarmRetryTimer !== null,
     browserConnected: browser?.isConnected?.() ?? false,
     launchPending: browserLaunchPromise !== null || browserLaunchTask !== null,
+    shuttingDown,
   })) return;
   browserWarmRetryTimer = setTimeout(async () => {
     browserWarmRetryTimer = null;
@@ -904,6 +912,7 @@ function attachBrowserCleanup(candidateBrowser, localVirtualDisplay) {
  * clean temp profiles -> verify FD/handle drop.
  */
 async function closeBrowserFully(reason) {
+  cancelBrowserWarmRetry();
   if (_browserClosePromise) return _browserClosePromise;
   const priorFailure = previousBrowserCleanupFailure({
     browserPresent: browser !== null,
@@ -1270,6 +1279,7 @@ async function launchBrowserInstance(launchToken) {
 }
 
 async function ensureBrowser() {
+  if (shuttingDown) throw new Error('server is shutting down');
   clearBrowserIdleTimer();
   if (_browserClosePromise) {
     const closeResult = await _browserClosePromise;
@@ -6637,11 +6647,10 @@ process.on('unhandledRejection', (reason) => {
 });
 
 // Graceful shutdown
-let shuttingDown = false;
-
 async function gracefulShutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
+  cancelBrowserWarmRetry();
   log('info', 'shutting down', { signal });
 
   // Arm the watchdog and stop accepting new connections before anything
