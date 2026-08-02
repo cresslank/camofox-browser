@@ -52,6 +52,11 @@ import { prepareExternalCamoufoxExecutable } from './lib/camoufox-executable.js'
 import { killProcessIds } from './lib/browser-processes.js';
 import { snapshotOwnedBrowserProcesses, survivingOwnedBrowserProcesses } from './lib/process-ownership.js';
 import {
+  browserCloseCompleted,
+  browserCloseStarted,
+  browserHealthDecision,
+} from './lib/browser-health.js';
+import {
   safePageUrl, urlDomain, hashIdentifier,
   isDeadContextError, isPageCrashedError, isTimeoutError,
   isTabLockQueueTimeout, isTabDestroyedError,
@@ -488,6 +493,7 @@ app.post('/sessions/:userId/cookies', express.json({ limit: '512kb' }), async (r
 let browser = null;
 let _lastBrowserPid = null; // Track PID independently for force-kill after close
 let _browserClosePromise = null; // Shared promise for concurrent close serialization
+let _browserCloseState = { inProgress: false, failed: false, reason: null, error: null };
 let _lastBrowserRestartAt = 0; // Timestamp of last browser relaunch (for stale tab detection)
 let _browserMemoryOverThresholdSamples = 0;
 // userId -> { context, tabGroups: Map<sessionKey, Map<tabId, TabState>>, lastAccess }
@@ -676,16 +682,9 @@ let browserIdleTimer = null;
 let browserLaunchPromise = null;
 let browserWarmRetryTimer = null;
 
-// Tracks why the browser was last stopped. Intentional idle/admin stops and
-// managed memory-pressure recycles keep /health returning 200. Unexpected
-// reasons trigger 503 + warm retry.
+// Tracks the last completed browser stop. In-progress and failed cleanup are
+// tracked separately so /health cannot report success before recycle completion.
 let _lastBrowserStopReason = null;
-const INTENTIONAL_STOP_REASONS = new Set([
-  'idle_shutdown',
-  'admin_stop',
-  'browser_rss_pressure',
-  'memory_pressure',
-]);
 
 function scheduleBrowserIdleShutdown() {
   if (browserIdleTimer || sessions.size > 0 || !browser) return;
@@ -774,7 +773,10 @@ async function restartBrowser(reason) {
   pluginEvents.emit('browser:restart', { reason });
   try {
     await closeAllSessions(`browser_restart:${reason}`, { clearDownloads: true, clearLocks: true });
-    await closeBrowserFully(`browser_restart:${reason}`);
+    const closeResult = await closeBrowserFully(`browser_restart:${reason}`);
+    if (!closeResult.cleanupVerified) {
+      throw new Error(`browser cleanup not verified: ${closeResult.error || 'survivors remain'}`);
+    }
     pluginEvents.emit('browser:closed', { reason });
     browserLaunchPromise = null;
     await ensureBrowser();
@@ -886,17 +888,44 @@ function attachBrowserCleanup(candidateBrowser, localVirtualDisplay) {
  */
 async function closeBrowserFully(reason) {
   if (_browserClosePromise) return _browserClosePromise;
-  _browserClosePromise = _closeBrowserFullyImpl(reason);
+  const started = browserCloseStarted(reason);
+  _browserCloseState = started.closeState;
+  _lastBrowserStopReason = started.lastStopReason;
+
+  const closePromise = (async () => {
+    try {
+      const result = await _closeBrowserFullyImpl(reason);
+      const completed = browserCloseCompleted(reason, result);
+      _browserCloseState = completed.closeState;
+      _lastBrowserStopReason = completed.lastStopReason;
+      if (_browserCloseState.failed) {
+        log('error', 'browser cleanup could not be verified', {
+          reason,
+          error: result.error || null,
+          survivors: result.survivors,
+        });
+      }
+      return result;
+    } catch (err) {
+      const completed = browserCloseCompleted(reason, { cleanupVerified: false, error: err.message });
+      _browserCloseState = completed.closeState;
+      _lastBrowserStopReason = completed.lastStopReason;
+      log('error', 'browser cleanup failed', { reason, error: err.message });
+      return { cleanupVerified: false, error: err.message, survivors: [] };
+    }
+  })();
+
+  _browserClosePromise = closePromise;
   try {
-    return await _browserClosePromise;
+    return await closePromise;
   } finally {
-    _browserClosePromise = null;
+    if (_browserClosePromise === closePromise) _browserClosePromise = null;
   }
 }
 
 async function _closeBrowserFullyImpl(reason) {
   const b = browser;
-  if (!b) return;
+  if (!b) return { cleanupVerified: true, error: null, survivors: [] };
   clearBrowserIdleTimer();
 
   // Capture PID/process snapshot before nulling browser ref.
@@ -908,22 +937,22 @@ async function _closeBrowserFullyImpl(reason) {
   const preCloseFds = _countOpenFds();
   const preCloseHandles = _countActiveHandles();
 
-  // Track stop reason for health semantics
-  _lastBrowserStopReason = reason;
-
-  // Null the ref so new requests don't use a dying browser
+  // Null the ref so new requests don't use a dying browser. /health remains
+  // unhealthy through _browserCloseState until cleanup is verified.
   browser = null;
   _lastBrowserPid = null;
   _browserMemoryOverThresholdSamples = 0;
 
   // Close through Playwright (sends CDP Browser.close, then SIGKILL process group)
   let closeTimer;
+  let closeError = null;
   try {
     await Promise.race([
       b.close(),
       new Promise((_, reject) => { closeTimer = setTimeout(() => reject(new Error('browser.close() timeout')), 10000); }),
     ]);
   } catch (err) {
+    closeError = err;
     log('warn', 'browser.close() failed or timed out', { reason, error: err.message, pid });
   } finally {
     clearTimeout(closeTimer);
@@ -933,7 +962,10 @@ async function _closeBrowserFullyImpl(reason) {
   if (pid) {
     await _forceKillProcessTree(pid, reason);
   }
-  await _forceKillBrowserProcesses(reason, ownedBrowserProcesses);
+  const survivorCleanup = await _forceKillBrowserProcesses(reason, ownedBrowserProcesses);
+  const cleanupVerified = ownedBrowserProcesses.length > 0
+    ? survivorCleanup.verified && survivorCleanup.survivors.length === 0
+    : closeError === null;
 
   // Clean up stale Firefox temp profiles (enable_cache: true accumulates data)
   try {
@@ -961,8 +993,20 @@ async function _closeBrowserFullyImpl(reason) {
     }
   }
   log('info', 'browser closed fully', {
-    reason, pid, preCloseFds, postCloseFds, preCloseHandles, postCloseHandles,
+    reason,
+    pid,
+    cleanupVerified,
+    survivors: survivorCleanup.survivors,
+    preCloseFds,
+    postCloseFds,
+    preCloseHandles,
+    postCloseHandles,
   });
+  return {
+    cleanupVerified,
+    error: closeError?.message || null,
+    survivors: survivorCleanup.survivors,
+  };
 }
 
 /**
@@ -1000,18 +1044,26 @@ async function _forceKillProcessTree(pid, reason) {
 }
 
 async function _forceKillBrowserProcesses(reason, ownedBrowserProcesses = []) {
-  if (process.platform !== 'linux') return;
+  if (process.platform !== 'linux') return { verified: false, survivors: [] };
   let victims = [];
   try {
     victims = survivingOwnedBrowserProcesses(ownedBrowserProcesses).map(proc => proc.pid);
   } catch (err) {
     log('warn', 'failed to scan for browser survivor processes', { reason, error: err.message });
-    return;
+    return { verified: false, survivors: [] };
   }
 
   if (victims.length > 0) {
     log('warn', 'killing browser survivor processes', { reason, victims });
     await killProcessIds(victims, { signal: 'SIGKILL', delayMs: 300 });
+  }
+
+  try {
+    const survivors = survivingOwnedBrowserProcesses(ownedBrowserProcesses).map(proc => proc.pid);
+    return { verified: true, survivors };
+  } catch (err) {
+    log('warn', 'failed to verify browser survivor cleanup', { reason, error: err.message });
+    return { verified: false, survivors: [] };
   }
 }
 
@@ -1124,6 +1176,7 @@ async function launchBrowserInstance() {
       _lastBrowserPid = candidateBrowser.process?.()?.pid ?? null;
       browser = candidateBrowser; // publish AFTER PID is captured
       _lastBrowserStopReason = null; // clear — browser is healthy
+      _browserCloseState = { inProgress: false, failed: false, reason: null, error: null };
       _lastBrowserRestartAt = Date.now();
       _browserMemoryOverThresholdSamples = 0;
       attachBrowserCleanup(browser, localVirtualDisplay);
@@ -1157,7 +1210,13 @@ async function launchBrowserInstance() {
 async function ensureBrowser() {
   clearBrowserIdleTimer();
   if (_browserClosePromise) {
-    await _browserClosePromise;
+    const closeResult = await _browserClosePromise;
+    if (!closeResult.cleanupVerified) {
+      throw new Error(`browser cleanup not verified: ${closeResult.error || 'survivors remain'}`);
+    }
+  }
+  if (_browserCloseState.failed) {
+    throw new Error(`browser cleanup not verified: ${_browserCloseState.error || _browserCloseState.reason || 'unknown'}`);
   }
   if (browser && !browser.isConnected()) {
     failuresTotal.labels('browser_disconnected', 'internal').inc();
@@ -1165,7 +1224,10 @@ async function ensureBrowser() {
       deadSessions: sessions.size,
     });
     await closeAllSessions('browser_disconnected', { clearDownloads: true, clearLocks: true });
-    await closeBrowserFully('browser_disconnected');
+    const closeResult = await closeBrowserFully('browser_disconnected');
+    if (!closeResult.cleanupVerified) {
+      throw new Error(`browser cleanup not verified: ${closeResult.error || 'survivors remain'}`);
+    }
   }
   if (browser) return browser;
   if (browserLaunchPromise) return browserLaunchPromise;
@@ -2530,25 +2592,27 @@ async function refreshTabRefs(tabState, options = {}) {
  *                   type: boolean
  */
 app.get('/health', (req, res) => {
-  if (healthState.isRecovering) {
-    return res.status(503).json({ ok: false, engine: 'camoufox', recovering: true });
-  }
   const running = browser !== null && (browser.isConnected?.() ?? false);
   const mem = process.memoryUsage();
   const rssMb = Math.round(mem.rss / 1048576);
   const heapUsedMb = Math.round(mem.heapUsed / 1048576);
   const nativeMemMb = rssMb - heapUsedMb;
+  const decision = browserHealthDecision({
+    running,
+    isRecovering: healthState.isRecovering,
+    closeState: _browserCloseState,
+    lastStopReason: _lastBrowserStopReason,
+  });
 
-  // Browser not running: distinguish intentional idle stop from unexpected death
-  if (!running && _lastBrowserStopReason && !INTENTIONAL_STOP_REASONS.has(_lastBrowserStopReason)) {
-    // Unexpected browser absence — schedule recovery and report unhealthy
-    scheduleBrowserWarmRetry();
+  if (!decision.ok) {
+    if (decision.shouldRetry) scheduleBrowserWarmRetry();
     return res.status(503).json({
       ok: false,
       engine: 'camoufox',
-      browserRunning: false,
-      reason: _lastBrowserStopReason,
-      activeTabs: 0,
+      recovering: decision.recovering,
+      browserRunning: running,
+      reason: decision.reason,
+      activeTabs: getTotalTabCount(),
       activeSessions: sessions.size,
       memory: { rssMb, heapUsedMb, nativeMemMb },
       ...(FLY_MACHINE_ID ? { machineId: FLY_MACHINE_ID } : {}),
@@ -5571,23 +5635,28 @@ setInterval(() => {
 // Never match host-global Firefox/Zen process names: unrelated desktop browsers
 // must not influence this service's recycle decision.
 setInterval(() => {
-  if (sessions.size > 0 || !browser) return;
+  if (!browser) {
+    _browserMemoryOverThresholdSamples = 0;
+    return;
+  }
   const mem = process.memoryUsage();
   const nativeMemMb = Math.round((mem.rss - mem.heapUsed) / 1048576);
   const browserPssMb = browserProcessTreePssMb(_browserPid())
     ?? browserOwnedProcessPssMb(process.pid);
   const pressure = evaluateBrowserMemoryPressure({
     browserMemoryMb: browserPssMb,
-    thresholdMb: CONFIG.browserRssRestartThresholdMb,
+    thresholdMb: CONFIG.browserPssRestartThresholdMb,
     launchedAt: _lastBrowserRestartAt,
     consecutiveOverThreshold: _browserMemoryOverThresholdSamples,
+    eligible: sessions.size === 0,
   });
   _browserMemoryOverThresholdSamples = pressure.consecutiveOverThreshold;
+  if (pressure.action === 'skipped') return;
 
   if (pressure.action === 'restart') {
     log('warn', 'browser memory pressure, restarting browser', {
       browserPssMb,
-      thresholdMb: CONFIG.browserRssRestartThresholdMb,
+      thresholdMb: CONFIG.browserPssRestartThresholdMb,
       samples: 2,
     });
     browserRestartsTotal.labels('browser_rss_pressure').inc();
@@ -5921,7 +5990,14 @@ app.post('/stop', async (req, res) => {
       return res.status(403).json({ error: 'Forbidden' });
     }
     await closeAllSessions('admin_stop', { clearDownloads: true, clearLocks: true });
-    await closeBrowserFully('admin_stop');
+    const closeResult = await closeBrowserFully('admin_stop');
+    if (!closeResult.cleanupVerified) {
+      return res.status(500).json({
+        ok: false,
+        stopped: false,
+        error: 'Browser cleanup could not be verified',
+      });
+    }
     res.json({ ok: true, stopped: true, profile: 'camoufox' });
   } catch (err) {
     res.status(500).json({ ok: false, error: safeError(err) });

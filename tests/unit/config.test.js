@@ -61,12 +61,17 @@ describe('loadConfig', () => {
     expect(config.serverEnv.CAMOFOX_EVALUATE_MAX_BODY_SIZE).toBe('10mb');
   });
 
-  test('configures browser RSS restart threshold', () => {
+  test('configures browser PSS restart threshold with RSS compatibility alias', () => {
+    delete process.env.BROWSER_PSS_RESTART_THRESHOLD_MB;
     delete process.env.BROWSER_RSS_RESTART_THRESHOLD_MB;
-    expect(loadConfig().browserRssRestartThresholdMb).toBe(1500);
+    expect(loadConfig().browserPssRestartThresholdMb).toBe(1500);
 
     process.env.BROWSER_RSS_RESTART_THRESHOLD_MB = '2048';
+    expect(loadConfig().browserPssRestartThresholdMb).toBe(2048);
     expect(loadConfig().browserRssRestartThresholdMb).toBe(2048);
+
+    process.env.BROWSER_PSS_RESTART_THRESHOLD_MB = '3072';
+    expect(loadConfig().browserPssRestartThresholdMb).toBe(3072);
   });
 
   test('reads newPageTimeoutMs from camofox.config.json with a 10s fallback', () => {

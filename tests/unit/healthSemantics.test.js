@@ -1,75 +1,60 @@
-'use strict';
+import { describe, expect, test } from '@jest/globals';
+import {
+  browserCloseCompleted,
+  browserCloseStarted,
+  browserHealthDecision,
+  isIntentionalBrowserStop,
+} from '../../lib/browser-health.js';
 
-/**
- * Tests for /health endpoint semantics:
- * - 200 when browser running
- * - 200 when browser intentionally stopped (idle/admin or managed memory recycle)
- * - 503 when browser unexpectedly missing (browser_disconnected, etc.)
- */
+describe('browser health classification', () => {
+  test('reports production close transitions as unhealthy until cleanup succeeds', () => {
+    const started = browserCloseStarted('browser_rss_pressure');
+    expect(browserHealthDecision({
+      running: false,
+      closeState: started.closeState,
+      lastStopReason: started.lastStopReason,
+    })).toMatchObject({ ok: false, recovering: true, shouldRetry: false });
 
-const INTENTIONAL_STOP_REASONS = new Set([
-  'idle_shutdown',
-  'admin_stop',
-  'browser_rss_pressure',
-  'memory_pressure',
-]);
+    const failed = browserCloseCompleted('browser_rss_pressure', {
+      cleanupVerified: false,
+      error: 'survivors remain',
+    });
+    expect(browserHealthDecision({
+      running: false,
+      closeState: failed.closeState,
+      lastStopReason: failed.lastStopReason,
+    })).toMatchObject({
+      ok: false,
+      recovering: false,
+      reason: 'browser_close_failed:browser_rss_pressure',
+      shouldRetry: false,
+    });
 
-function computeHealthResponse({ browserConnected, lastStopReason, isRecovering }) {
-  if (isRecovering) {
-    return { status: 503, body: { ok: false, recovering: true } };
-  }
-  if (!browserConnected && lastStopReason && !INTENTIONAL_STOP_REASONS.has(lastStopReason)) {
-    return { status: 503, body: { ok: false, browserRunning: false, reason: lastStopReason } };
-  }
-  return { status: 200, body: { ok: true, browserRunning: browserConnected } };
-}
-
-describe('health endpoint semantics', () => {
-  test('returns 200 when browser is connected', () => {
-    const r = computeHealthResponse({ browserConnected: true, lastStopReason: null, isRecovering: false });
-    expect(r.status).toBe(200);
-    expect(r.body.ok).toBe(true);
+    const completed = browserCloseCompleted('browser_rss_pressure', { cleanupVerified: true });
+    expect(browserHealthDecision({
+      running: false,
+      closeState: completed.closeState,
+      lastStopReason: completed.lastStopReason,
+    })).toMatchObject({ ok: true, recovering: false });
   });
 
-  test('returns 200 when browser idle-stopped intentionally', () => {
-    const r = computeHealthResponse({ browserConnected: false, lastStopReason: 'idle_shutdown', isRecovering: false });
-    expect(r.status).toBe(200);
+  test('accepts only completed intentional stops', () => {
+    for (const reason of ['idle_shutdown', 'admin_stop', 'browser_rss_pressure', 'memory_pressure']) {
+      expect(isIntentionalBrowserStop(reason)).toBe(true);
+      expect(browserHealthDecision({ running: false, lastStopReason: reason })).toMatchObject({ ok: true });
+    }
   });
 
-  test('returns 200 when browser admin-stopped', () => {
-    const r = computeHealthResponse({ browserConnected: false, lastStopReason: 'admin_stop', isRecovering: false });
-    expect(r.status).toBe(200);
+  test('requests recovery for unexpected browser absence', () => {
+    expect(browserHealthDecision({ running: false, lastStopReason: 'browser_disconnected' })).toEqual({
+      ok: false,
+      recovering: false,
+      reason: 'browser_disconnected',
+      shouldRetry: true,
+    });
   });
 
-  test('returns 503 when browser disconnected unexpectedly', () => {
-    const r = computeHealthResponse({ browserConnected: false, lastStopReason: 'browser_disconnected', isRecovering: false });
-    expect(r.status).toBe(503);
-    expect(r.body.reason).toBe('browser_disconnected');
-  });
-
-  test('returns 200 after a managed native memory recycle', () => {
-    const r = computeHealthResponse({ browserConnected: false, lastStopReason: 'memory_pressure', isRecovering: false });
-    expect(r.status).toBe(200);
-  });
-
-  test('returns 200 after a managed browser memory recycle', () => {
-    const r = computeHealthResponse({ browserConnected: false, lastStopReason: 'browser_rss_pressure', isRecovering: false });
-    expect(r.status).toBe(200);
-  });
-
-  test('returns 503 when recovering', () => {
-    const r = computeHealthResponse({ browserConnected: false, lastStopReason: 'idle_shutdown', isRecovering: true });
-    expect(r.status).toBe(503);
-    expect(r.body.recovering).toBe(true);
-  });
-
-  test('returns 200 when no stop reason (fresh start, browser not yet launched)', () => {
-    const r = computeHealthResponse({ browserConnected: false, lastStopReason: null, isRecovering: false });
-    expect(r.status).toBe(200);
-  });
-
-  test('returns 503 for browser_restart reasons', () => {
-    const r = computeHealthResponse({ browserConnected: false, lastStopReason: 'browser_restart:nav_failures', isRecovering: false });
-    expect(r.status).toBe(503);
+  test('reports a connected browser healthy', () => {
+    expect(browserHealthDecision({ running: true, lastStopReason: null })).toMatchObject({ ok: true });
   });
 });

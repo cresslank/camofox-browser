@@ -68,10 +68,35 @@ describe('owned browser memory accounting', () => {
     expect(browserProcessTreeRssMb(101, { procRoot })).toBe(180);
   });
 
-  test('falls back to scoped RSS when smaps_rollup is unavailable', () => {
-    writeProcess(101, { rssKb: 120 * 1024, pssKb: 100 * 1024 });
+  test('falls back to scoped RSS when smaps_rollup is unavailable or malformed', () => {
+    writeProcess(101, {
+      rssKb: 120 * 1024,
+      pssKb: 100 * 1024,
+      cmdline: '/cache/camoufox-bin\0-foreground',
+    });
     fs.unlinkSync(path.join(procRoot, '101', 'smaps_rollup'));
     expect(browserProcessTreePssMb(101, { procRoot })).toBe(120);
+
+    fs.writeFileSync(path.join(procRoot, '101', 'smaps_rollup'), 'malformed\n');
+    expect(browserProcessTreePssMb(101, { procRoot })).toBe(120);
+  });
+
+  test('skips vanished processes and rejects invalid roots', () => {
+    writeProcess(101, {
+      ppid: 100,
+      pssKb: 100 * 1024,
+      cmdline: '/cache/camoufox-bin\0-foreground',
+    });
+    writeProcess(102, {
+      ppid: 101,
+      pssKb: 50 * 1024,
+      cmdline: '/cache/camoufox-bin\0-contentproc',
+    });
+    fs.rmSync(path.join(procRoot, '102'), { recursive: true, force: true });
+
+    expect(browserProcessTreePssMb(101, { procRoot })).toBe(100);
+    expect(browserProcessTreePssMb(0, { procRoot })).toBeNull();
+    expect(browserProcessTreePssMb(101, { procRoot: path.join(procRoot, 'missing') })).toBeNull();
   });
 
   test('returns null when the owner has no browser descendants', () => {
@@ -112,6 +137,23 @@ describe('browser memory pressure policy', () => {
       now: 100_000,
       consecutiveOverThreshold: first.consecutiveOverThreshold,
     })).toEqual({ action: 'restart', consecutiveOverThreshold: 0 });
+  });
+
+  test('active sessions break consecutive sample continuity', () => {
+    const skipped = evaluateBrowserMemoryPressure({
+      ...base,
+      browserMemoryMb: 2000,
+      now: 100_000,
+      consecutiveOverThreshold: 1,
+      eligible: false,
+    });
+    expect(skipped).toEqual({ action: 'skipped', consecutiveOverThreshold: 0 });
+    expect(evaluateBrowserMemoryPressure({
+      ...base,
+      browserMemoryMb: 2000,
+      now: 130_000,
+      consecutiveOverThreshold: skipped.consecutiveOverThreshold,
+    })).toEqual({ action: 'observe', consecutiveOverThreshold: 1 });
   });
 
   test('a below-threshold sample resets the consecutive count', () => {
