@@ -56,6 +56,7 @@ import {
 } from './lib/process-ownership.js';
 import {
   browserLaunchCancelledError,
+  browserStartCancelledError,
   cancelPendingBrowserLaunch,
   createBrowserLaunchFence,
 } from './lib/browser-lifecycle.js';
@@ -693,6 +694,7 @@ let browserIdleTimer = null;
 let browserLaunchPromise = null;
 let browserLaunchTask = null;
 const browserLaunchFence = createBrowserLaunchFence();
+const browserStartFence = createBrowserLaunchFence();
 let browserWarmRetryTimer = null;
 let browserWarmRetryDeferred = false;
 let browserWarmRetryDeferredDelayMs = 5000;
@@ -704,6 +706,16 @@ function cancelBrowserWarmRetry() {
   if (browserWarmRetryTimer === null) return;
   clearTimeout(browserWarmRetryTimer);
   browserWarmRetryTimer = null;
+}
+
+function cancelBrowserStartAndRecovery() {
+  browserStartFence.cancel();
+  cancelBrowserWarmRetry();
+}
+
+function assertBrowserStartAllowed(startToken) {
+  if (shuttingDown) throw browserStartCancelledError();
+  if (!browserStartFence.isCurrent(startToken)) throw browserStartCancelledError();
 }
 
 // Tracks the last completed browser stop. In-progress and failed cleanup are
@@ -764,13 +776,19 @@ function scheduleBrowserWarmRetry(delayMs = 5000) {
   }
   browserWarmRetryDeferred = false;
   browserWarmRetryDeferredDelayMs = 5000;
+  const startToken = browserStartFence.capture();
   browserWarmRetryTimer = setTimeout(async () => {
     browserWarmRetryTimer = null;
     try {
+      assertBrowserStartAllowed(startToken);
       const start = Date.now();
-      await ensureBrowser();
+      await ensureBrowser({ startToken });
       log('info', 'background browser warm retry succeeded', { ms: Date.now() - start });
     } catch (err) {
+      if (err?.code === 'BROWSER_START_CANCELLED' || err?.code === 'BROWSER_LAUNCH_CANCELLED') {
+        log('info', 'background browser warm retry cancelled', { reason: err.code });
+        return;
+      }
       if (isFatalInstallError(err)) {
         log('error', 'browser unavailable: Camoufox binaries are not installed; aborting retry loop', {
           error: err.message,
@@ -811,6 +829,7 @@ function recordNavFailure() {
 
 async function restartBrowser(reason) {
   if (healthState.isRecovering) return;
+  const startToken = browserStartFence.capture();
   healthState.isRecovering = true;
   browserRestartsTotal.labels(reason).inc();
   log('error', 'restarting browser', { reason, failures: healthState.consecutiveNavFailures });
@@ -822,8 +841,8 @@ async function restartBrowser(reason) {
       throw new Error(`browser cleanup not verified: ${closeResult.error || 'survivors remain'}`);
     }
     pluginEvents.emit('browser:closed', { reason });
-    browserLaunchPromise = null;
-    await ensureBrowser();
+    assertBrowserStartAllowed(startToken);
+    await ensureBrowser({ startToken });
     healthState.consecutiveNavFailures = 0;
     healthState.lastSuccessfulNav = Date.now();
     log('info', 'browser restarted successfully');
@@ -1313,14 +1332,15 @@ async function launchBrowserInstance(launchToken) {
   throw lastError || new Error('Failed to launch a usable browser');
 }
 
-async function ensureBrowser() {
-  if (shuttingDown) throw new Error('server is shutting down');
+async function ensureBrowser({ startToken = browserStartFence.capture() } = {}) {
+  assertBrowserStartAllowed(startToken);
   clearBrowserIdleTimer();
   if (_browserClosePromise) {
     const closeResult = await _browserClosePromise;
     if (!closeResult.cleanupVerified) {
       throw new Error(`browser cleanup not verified: ${closeResult.error || 'survivors remain'}`);
     }
+    assertBrowserStartAllowed(startToken);
   }
   if (_browserCloseState.failed) {
     throw new Error(`browser cleanup not verified: ${_browserCloseState.error || _browserCloseState.reason || 'unknown'}`);
@@ -1331,11 +1351,13 @@ async function ensureBrowser() {
       deadSessions: sessions.size,
     });
     await closeAllSessions('browser_disconnected', { clearDownloads: true, clearLocks: true });
+    assertBrowserStartAllowed(startToken);
     const closeResult = await closeBrowserFully('browser_disconnected');
     if (!closeResult.cleanupVerified) {
       throw new Error(`browser cleanup not verified: ${closeResult.error || 'survivors remain'}`);
     }
   }
+  assertBrowserStartAllowed(startToken);
   if (browser) return browser;
   if (browserLaunchPromise) return browserLaunchPromise;
   if (browserLaunchTask) throw new Error('browser launch cleanup is still in progress');
@@ -6132,6 +6154,7 @@ app.post('/stop', async (req, res) => {
     if (!adminKey || !timingSafeCompare(adminKey, CONFIG.adminKey)) {
       return res.status(403).json({ error: 'Forbidden' });
     }
+    cancelBrowserStartAndRecovery();
     await closeAllSessions('admin_stop', { clearDownloads: true, clearLocks: true });
     const closeResult = await closeBrowserFully('admin_stop');
     if (!closeResult.cleanupVerified) {
@@ -6706,7 +6729,7 @@ const SHUTDOWN_SESSION_TIMEOUT_MS = 5000;
 async function gracefulShutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
-  cancelBrowserWarmRetry();
+  cancelBrowserStartAndRecovery();
   log('info', 'shutting down', { signal });
 
   // Arm the watchdog and stop accepting new connections before anything

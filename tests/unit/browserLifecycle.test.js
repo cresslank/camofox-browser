@@ -1,6 +1,7 @@
 import { describe, expect, test } from '@jest/globals';
 import {
   browserLaunchCancelledError,
+  browserStartCancelledError,
   cancelPendingBrowserLaunch,
   createBrowserLaunchFence,
 } from '../../lib/browser-lifecycle.js';
@@ -53,6 +54,11 @@ describe('browser lifecycle fence', () => {
     const token = fence.capture();
     await cancelPendingBrowserLaunch(fence, null);
     expect(fence.isCurrent(token)).toBe(false);
+  });
+
+  test('start cancellation errors are distinguishable from launch cancellation', () => {
+    const error = browserStartCancelledError();
+    expect(error.code).toBe('BROWSER_START_CANCELLED');
   });
 
   test('cancellation errors are distinguishable from launch failures', () => {
