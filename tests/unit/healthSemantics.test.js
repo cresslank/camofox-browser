@@ -3,11 +3,16 @@
 /**
  * Tests for /health endpoint semantics:
  * - 200 when browser running
- * - 200 when browser intentionally idle-stopped (idle_shutdown, admin_stop)
- * - 503 when browser unexpectedly missing (browser_disconnected, memory_pressure, etc.)
+ * - 200 when browser intentionally stopped (idle/admin or managed memory recycle)
+ * - 503 when browser unexpectedly missing (browser_disconnected, etc.)
  */
 
-const INTENTIONAL_STOP_REASONS = new Set(['idle_shutdown', 'admin_stop']);
+const INTENTIONAL_STOP_REASONS = new Set([
+  'idle_shutdown',
+  'admin_stop',
+  'browser_rss_pressure',
+  'memory_pressure',
+]);
 
 function computeHealthResponse({ browserConnected, lastStopReason, isRecovering }) {
   if (isRecovering) {
@@ -42,14 +47,14 @@ describe('health endpoint semantics', () => {
     expect(r.body.reason).toBe('browser_disconnected');
   });
 
-  test('returns 503 for memory_pressure', () => {
+  test('returns 200 after a managed native memory recycle', () => {
     const r = computeHealthResponse({ browserConnected: false, lastStopReason: 'memory_pressure', isRecovering: false });
-    expect(r.status).toBe(503);
+    expect(r.status).toBe(200);
   });
 
-  test('returns 503 for browser_rss_pressure', () => {
+  test('returns 200 after a managed browser memory recycle', () => {
     const r = computeHealthResponse({ browserConnected: false, lastStopReason: 'browser_rss_pressure', isRecovering: false });
-    expect(r.status).toBe(503);
+    expect(r.status).toBe(200);
   });
 
   test('returns 503 when recovering', () => {
