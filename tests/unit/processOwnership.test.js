@@ -1,7 +1,12 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { snapshotOwnedBrowserProcesses, survivingOwnedBrowserProcesses } from '../../lib/process-ownership.js';
+import {
+  captureOwnedBrowserProcesses,
+  inspectOwnedBrowserProcesses,
+  snapshotOwnedBrowserProcesses,
+  survivingOwnedBrowserProcesses,
+} from '../../lib/process-ownership.js';
 
 function proc(root, pid, ppid, cmdline, startTime = '10', comm = 'test') {
   const dir = path.join(root, String(pid));
@@ -47,6 +52,56 @@ test('pid reuse is not mistaken for an owned survivor', () => {
   const snapshot = snapshotOwnedBrowserProcesses(100, root);
   fs.writeFileSync(path.join(root, '101', 'stat'), '101 (test) S 100 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 99');
   expect(survivingOwnedBrowserProcesses(snapshot, root)).toEqual([]);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('malformed process state is indeterminate rather than confirmed gone', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'camofox-proc-'));
+  proc(root, 100, 1, 'node\0server.js');
+  proc(root, 101, 100, '/cache/camoufox-bin', '10');
+  const snapshot = snapshotOwnedBrowserProcesses(100, root);
+  fs.writeFileSync(path.join(root, '101', 'stat'), 'malformed');
+
+  const capture = captureOwnedBrowserProcesses(100, root);
+  expect(capture.processes).toEqual([]);
+  expect(capture.indeterminate.map(item => item.pid)).toEqual([101]);
+
+  const inspection = inspectOwnedBrowserProcesses(snapshot, root);
+  expect(inspection.survivors).toEqual([]);
+  expect(inspection.indeterminate.map(({ proc: item }) => item.pid)).toEqual([101]);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('unreadable process state is indeterminate rather than confirmed gone', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'camofox-proc-'));
+  proc(root, 100, 1, 'node\0server.js');
+  proc(root, 101, 100, '/cache/camoufox-bin', '10');
+  const snapshot = snapshotOwnedBrowserProcesses(100, root);
+  const statPath = path.join(root, '101', 'stat');
+  fs.chmodSync(statPath, 0o000);
+
+  try {
+    const capture = captureOwnedBrowserProcesses(100, root);
+    expect(capture.processes).toEqual([]);
+    expect(capture.indeterminate.map(item => item.pid)).toEqual([101]);
+
+    const inspection = inspectOwnedBrowserProcesses(snapshot, root);
+    expect(inspection.survivors).toEqual([]);
+    expect(inspection.indeterminate.map(({ proc: item }) => item.pid)).toEqual([101]);
+  } finally {
+    fs.chmodSync(statPath, 0o600);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('missing process state is confirmed disappearance', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'camofox-proc-'));
+  proc(root, 100, 1, 'node\0server.js');
+  proc(root, 101, 100, '/cache/camoufox-bin', '10');
+  const snapshot = snapshotOwnedBrowserProcesses(100, root);
+  fs.rmSync(path.join(root, '101'), { recursive: true, force: true });
+
+  expect(inspectOwnedBrowserProcesses(snapshot, root)).toEqual({ survivors: [], indeterminate: [] });
   fs.rmSync(root, { recursive: true, force: true });
 });
 

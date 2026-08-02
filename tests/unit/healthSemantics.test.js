@@ -1,9 +1,12 @@
 import { describe, expect, test } from '@jest/globals';
 import {
+  browserCleanupExitCode,
   browserCloseCompleted,
   browserCloseStarted,
   browserHealthDecision,
   isIntentionalBrowserStop,
+  previousBrowserCleanupFailure,
+  shouldScheduleBrowserWarmRetry,
 } from '../../lib/browser-health.js';
 
 describe('browser health classification', () => {
@@ -52,6 +55,51 @@ describe('browser health classification', () => {
       reason: 'browser_disconnected',
       shouldRetry: true,
     });
+  });
+
+  test('requests recovery for a published but disconnected browser', () => {
+    expect(browserHealthDecision({
+      running: false,
+      browserPresent: true,
+      lastStopReason: null,
+    })).toEqual({
+      ok: false,
+      recovering: false,
+      reason: 'browser_disconnected',
+      shouldRetry: true,
+    });
+  });
+
+  test('schedules recovery for a disconnected browser but not active lifecycle work', () => {
+    expect(shouldScheduleBrowserWarmRetry({ browserConnected: false })).toBe(true);
+    expect(shouldScheduleBrowserWarmRetry({ browserConnected: true })).toBe(false);
+    expect(shouldScheduleBrowserWarmRetry({ timerActive: true })).toBe(false);
+    expect(shouldScheduleBrowserWarmRetry({ launchPending: true })).toBe(false);
+  });
+
+  test('retains a failed cleanup across a repeated no-op close', () => {
+    const failed = browserCloseCompleted('admin_stop', {
+      cleanupVerified: false,
+      error: 'survivor state indeterminate',
+    });
+    expect(previousBrowserCleanupFailure({
+      browserPresent: false,
+      closeState: failed.closeState,
+    })).toEqual({
+      cleanupVerified: false,
+      error: 'survivor state indeterminate',
+      survivors: [],
+    });
+    expect(previousBrowserCleanupFailure({
+      browserPresent: true,
+      closeState: failed.closeState,
+    })).toBeNull();
+  });
+
+  test('shutdown exits nonzero when browser cleanup is not verified', () => {
+    expect(browserCleanupExitCode({ cleanupVerified: true })).toBe(0);
+    expect(browserCleanupExitCode({ cleanupVerified: false })).toBe(1);
+    expect(browserCleanupExitCode(null)).toBe(1);
   });
 
   test('reports a connected browser healthy', () => {

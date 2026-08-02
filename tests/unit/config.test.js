@@ -67,11 +67,16 @@ describe('loadConfig', () => {
     expect(loadConfig().browserPssRestartThresholdMb).toBe(1500);
 
     process.env.BROWSER_RSS_RESTART_THRESHOLD_MB = '2048';
-    expect(loadConfig().browserPssRestartThresholdMb).toBe(2048);
-    expect(loadConfig().browserRssRestartThresholdMb).toBe(2048);
+    let config = loadConfig();
+    expect(config.browserPssRestartThresholdMb).toBe(2048);
+    expect(config.browserRssRestartThresholdMb).toBe(2048);
+    expect(config.serverEnv.BROWSER_RSS_RESTART_THRESHOLD_MB).toBe('2048');
 
     process.env.BROWSER_PSS_RESTART_THRESHOLD_MB = '3072';
-    expect(loadConfig().browserPssRestartThresholdMb).toBe(3072);
+    config = loadConfig();
+    expect(config.browserPssRestartThresholdMb).toBe(3072);
+    expect(config.serverEnv.BROWSER_PSS_RESTART_THRESHOLD_MB).toBe('3072');
+    expect(config.serverEnv.BROWSER_RSS_RESTART_THRESHOLD_MB).toBe('2048');
   });
 
   test('reads newPageTimeoutMs from camofox.config.json with a 10s fallback', () => {

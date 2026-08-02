@@ -99,6 +99,19 @@ describe('owned browser memory accounting', () => {
     expect(browserProcessTreePssMb(101, { procRoot: path.join(procRoot, 'missing') })).toBeNull();
   });
 
+  test('returns null when initial browser ownership is indeterminate', () => {
+    writeProcess(100, { children: [101] });
+    writeProcess(101, {
+      ppid: 100,
+      pssKb: 100 * 1024,
+      cmdline: '/cache/camoufox-bin\0-foreground',
+    });
+    fs.writeFileSync(path.join(procRoot, '101', 'stat'), 'malformed');
+
+    expect(browserOwnedProcessPssMb(100, { procRoot })).toBeNull();
+    expect(browserProcessTreePssMb(101, { procRoot })).toBeNull();
+  });
+
   test('returns null when the owner has no browser descendants', () => {
     writeProcess(100, { children: [101] });
     writeProcess(101, { ppid: 100, pssKb: 2000 * 1024, cmdline: '/usr/bin/yt-dlp\0video' });

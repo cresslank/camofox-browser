@@ -50,11 +50,22 @@ import { mountDocs } from './lib/openapi.js';
 import { initSentry, captureException as sentryCaptureException, setupExpressErrorHandler as setupSentryErrorHandler, flush as sentryFlush } from './lib/sentry.js';
 import { prepareExternalCamoufoxExecutable } from './lib/camoufox-executable.js';
 import { killProcessIds } from './lib/browser-processes.js';
-import { snapshotOwnedBrowserProcesses, survivingOwnedBrowserProcesses } from './lib/process-ownership.js';
 import {
+  captureOwnedBrowserProcesses,
+  inspectOwnedBrowserProcesses,
+} from './lib/process-ownership.js';
+import {
+  browserLaunchCancelledError,
+  cancelPendingBrowserLaunch,
+  createBrowserLaunchFence,
+} from './lib/browser-lifecycle.js';
+import {
+  browserCleanupExitCode,
   browserCloseCompleted,
   browserCloseStarted,
   browserHealthDecision,
+  previousBrowserCleanupFailure,
+  shouldScheduleBrowserWarmRetry,
 } from './lib/browser-health.js';
 import {
   safePageUrl, urlDomain, hashIdentifier,
@@ -680,6 +691,8 @@ if (proxyPool) {
 const BROWSER_IDLE_TIMEOUT_MS = CONFIG.browserIdleTimeoutMs;
 let browserIdleTimer = null;
 let browserLaunchPromise = null;
+let browserLaunchTask = null;
+const browserLaunchFence = createBrowserLaunchFence();
 let browserWarmRetryTimer = null;
 
 // Tracks the last completed browser stop. In-progress and failed cleanup are
@@ -726,7 +739,11 @@ function camoufoxInstallRemediation() {
 }
 
 function scheduleBrowserWarmRetry(delayMs = 5000) {
-  if (browserWarmRetryTimer || browser || browserLaunchPromise) return;
+  if (!shouldScheduleBrowserWarmRetry({
+    timerActive: browserWarmRetryTimer !== null,
+    browserConnected: browser?.isConnected?.() ?? false,
+    launchPending: browserLaunchPromise !== null || browserLaunchTask !== null,
+  })) return;
   browserWarmRetryTimer = setTimeout(async () => {
     browserWarmRetryTimer = null;
     try {
@@ -888,11 +905,18 @@ function attachBrowserCleanup(candidateBrowser, localVirtualDisplay) {
  */
 async function closeBrowserFully(reason) {
   if (_browserClosePromise) return _browserClosePromise;
+  const priorFailure = previousBrowserCleanupFailure({
+    browserPresent: browser !== null,
+    closeState: _browserCloseState,
+  });
+  if (priorFailure) return priorFailure;
   const started = browserCloseStarted(reason);
   _browserCloseState = started.closeState;
   _lastBrowserStopReason = started.lastStopReason;
+  const pendingLaunch = browserLaunchTask || browserLaunchPromise;
 
   const closePromise = (async () => {
+    await cancelPendingBrowserLaunch(browserLaunchFence, pendingLaunch);
     try {
       const result = await _closeBrowserFullyImpl(reason);
       const completed = browserCloseCompleted(reason, result);
@@ -933,7 +957,8 @@ async function _closeBrowserFullyImpl(reason) {
   // Capture ownership before Playwright closes and reparents its children.
   // Multiple scoped servers may share a host, so a later /proc name scan must
   // never treat another server's browser as one of our survivors.
-  const ownedBrowserProcesses = snapshotOwnedBrowserProcesses(process.pid);
+  const ownershipCapture = captureOwnedBrowserProcesses(process.pid);
+  const ownedBrowserProcesses = ownershipCapture.processes;
   const preCloseFds = _countOpenFds();
   const preCloseHandles = _countActiveHandles();
 
@@ -963,9 +988,15 @@ async function _closeBrowserFullyImpl(reason) {
     await _forceKillProcessTree(pid, reason);
   }
   const survivorCleanup = await _forceKillBrowserProcesses(reason, ownedBrowserProcesses);
-  const cleanupVerified = ownedBrowserProcesses.length > 0
-    ? survivorCleanup.verified && survivorCleanup.survivors.length === 0
-    : closeError === null;
+  const cleanupVerified = ownershipCapture.indeterminate.length === 0 && (
+    ownedBrowserProcesses.length > 0
+      ? survivorCleanup.verified && survivorCleanup.survivors.length === 0
+      : closeError === null
+  );
+  const cleanupError = closeError?.message
+    || (ownershipCapture.indeterminate.length > 0 ? 'initial browser ownership snapshot indeterminate' : null)
+    || (survivorCleanup.survivors.length > 0 ? 'browser survivor processes remain' : null)
+    || (survivorCleanup.indeterminate.length > 0 ? 'browser survivor state indeterminate' : null);
 
   // Clean up stale Firefox temp profiles (enable_cache: true accumulates data)
   try {
@@ -1004,7 +1035,7 @@ async function _closeBrowserFullyImpl(reason) {
   });
   return {
     cleanupVerified,
-    error: closeError?.message || null,
+    error: cleanupError,
     survivors: survivorCleanup.survivors,
   };
 }
@@ -1044,13 +1075,24 @@ async function _forceKillProcessTree(pid, reason) {
 }
 
 async function _forceKillBrowserProcesses(reason, ownedBrowserProcesses = []) {
-  if (process.platform !== 'linux') return { verified: false, survivors: [] };
+  if (process.platform !== 'linux') return { verified: false, survivors: [], indeterminate: [] };
   let victims = [];
   try {
-    victims = survivingOwnedBrowserProcesses(ownedBrowserProcesses).map(proc => proc.pid);
+    const inspection = inspectOwnedBrowserProcesses(ownedBrowserProcesses);
+    victims = inspection.survivors.map(proc => proc.pid);
+    if (inspection.indeterminate.length > 0) {
+      log('warn', 'browser survivor state indeterminate before cleanup', {
+        reason,
+        pids: inspection.indeterminate.map(({ proc }) => proc.pid),
+      });
+    }
   } catch (err) {
     log('warn', 'failed to scan for browser survivor processes', { reason, error: err.message });
-    return { verified: false, survivors: [] };
+    return {
+      verified: false,
+      survivors: [],
+      indeterminate: ownedBrowserProcesses.map(proc => proc.pid),
+    };
   }
 
   if (victims.length > 0) {
@@ -1059,11 +1101,26 @@ async function _forceKillBrowserProcesses(reason, ownedBrowserProcesses = []) {
   }
 
   try {
-    const survivors = survivingOwnedBrowserProcesses(ownedBrowserProcesses).map(proc => proc.pid);
-    return { verified: true, survivors };
+    const inspection = inspectOwnedBrowserProcesses(ownedBrowserProcesses);
+    const survivors = inspection.survivors.map(proc => proc.pid);
+    if (inspection.indeterminate.length > 0) {
+      log('warn', 'browser survivor cleanup is indeterminate', {
+        reason,
+        pids: inspection.indeterminate.map(({ proc }) => proc.pid),
+      });
+    }
+    return {
+      verified: inspection.indeterminate.length === 0,
+      survivors,
+      indeterminate: inspection.indeterminate.map(({ proc }) => proc.pid),
+    };
   } catch (err) {
     log('warn', 'failed to verify browser survivor cleanup', { reason, error: err.message });
-    return { verified: false, survivors: [] };
+    return {
+      verified: false,
+      survivors: [],
+      indeterminate: ownedBrowserProcesses.map(proc => proc.pid),
+    };
   }
 }
 
@@ -1078,13 +1135,14 @@ function _countActiveHandles() {
   try { return process._getActiveHandles().length; } catch { return null; }
 }
 
-async function launchBrowserInstance() {
+async function launchBrowserInstance(launchToken) {
   const hostOS = getHostOS();
   const maxAttempts = proxyPool?.launchRetries ?? 1;
   let lastError = null;
   const externalCamoufox = getExternalCamoufoxLaunch();
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (!browserLaunchFence.isCurrent(launchToken)) throw browserLaunchCancelledError();
     const launchProxy = proxyPool
       ? proxyPool.getLaunchProxy(proxyPool.canRotateSessions ? `browser-${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}` : undefined)
       : null;
@@ -1145,8 +1203,10 @@ async function launchBrowserInstance() {
       options.handleSIGINT = false;
       options.handleSIGHUP = false;
       await pluginEvents.emitAsync('browser:launching', { options });
+      if (!browserLaunchFence.isCurrent(launchToken)) throw browserLaunchCancelledError();
 
       candidateBrowser = await firefox.launch(options);
+      if (!browserLaunchFence.isCurrent(launchToken)) throw browserLaunchCancelledError();
 
       if (proxyPool?.canRotateSessions) {
         const probe = await probeGoogleSearch(candidateBrowser);
@@ -1171,6 +1231,7 @@ async function launchBrowserInstance() {
         }
       }
 
+      if (!browserLaunchFence.isCurrent(launchToken)) throw browserLaunchCancelledError();
       virtualDisplay = localVirtualDisplay;
       browserLaunchProxy = launchProxy;
       _lastBrowserPid = candidateBrowser.process?.()?.pid ?? null;
@@ -1201,6 +1262,7 @@ async function launchBrowserInstance() {
       });
       await candidateBrowser?.close().catch(() => {});
       if (localVirtualDisplay) localVirtualDisplay.kill();
+      if (err.code === 'BROWSER_LAUNCH_CANCELLED') throw err;
     }
   }
 
@@ -1231,12 +1293,30 @@ async function ensureBrowser() {
   }
   if (browser) return browser;
   if (browserLaunchPromise) return browserLaunchPromise;
+  if (browserLaunchTask) return browserLaunchTask;
   const launchTimeoutMs = proxyPool?.launchTimeoutMs ?? 60000;
-  browserLaunchPromise = Promise.race([
-    launchBrowserInstance(),
-    new Promise((_, reject) => setTimeout(() => reject(new Error(`Browser launch timeout (${Math.round(launchTimeoutMs / 1000)}s)`)), launchTimeoutMs)),
-  ]).finally(() => { browserLaunchPromise = null; });
-  return browserLaunchPromise;
+  const launchToken = browserLaunchFence.capture();
+  let launchTimer;
+  const launchTask = launchBrowserInstance(launchToken);
+  browserLaunchTask = launchTask;
+  launchTask.finally(() => {
+    if (browserLaunchTask === launchTask) browserLaunchTask = null;
+  }).catch(() => {});
+
+  const publicLaunchPromise = Promise.race([
+    launchTask,
+    new Promise((_, reject) => {
+      launchTimer = setTimeout(() => reject(new Error(`Browser launch timeout (${Math.round(launchTimeoutMs / 1000)}s)`)), launchTimeoutMs);
+    }),
+  ]).catch((err) => {
+    if (browserLaunchFence.isCurrent(launchToken)) browserLaunchFence.cancel();
+    throw err;
+  }).finally(() => {
+    clearTimeout(launchTimer);
+    if (browserLaunchPromise === publicLaunchPromise) browserLaunchPromise = null;
+  });
+  browserLaunchPromise = publicLaunchPromise;
+  return publicLaunchPromise;
 }
 
 // Helper to normalize userId to string (JSON body may parse as number)
@@ -2599,6 +2679,7 @@ app.get('/health', (req, res) => {
   const nativeMemMb = rssMb - heapUsedMb;
   const decision = browserHealthDecision({
     running,
+    browserPresent: browser !== null,
     isRecovering: healthState.isRecovering,
     closeState: _browserCloseState,
     lastStopReason: _lastBrowserStopReason,
@@ -6585,9 +6666,9 @@ async function gracefulShutdown(signal) {
     clearLocks: false,
   });
 
-  await closeBrowserFully(`shutdown:${signal}`);
+  const closeResult = await closeBrowserFully(`shutdown:${signal}`);
   await sentryFlush(2000);
-  process.exit(0);
+  process.exit(browserCleanupExitCode(closeResult));
 }
 
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
