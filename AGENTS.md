@@ -135,12 +135,13 @@ npx jest plugins/youtube          # Single plugin's tests
 ```
 
 Treat `camoufox-js`, `playwright-core`, and the Camoufox browser bundle as one
-protocol contract. The current `0.10.2` / `1.59.1` pins are intentional:
-`camoufox-js` 0.11.1 with Playwright 1.61.1 sends an unsupported
-`Browser.setDefaultViewport.viewport.isMobile` field to the currently published
-Camoufox bundles. Do not relax either pin without a clean dependency install,
-the unit suite, and a real create/navigate/snapshot smoke against the candidate
-browser bundle.
+protocol contract. The current `0.11.5` / `1.59.1` pins are intentional and were
+validated together with the v1.13.1 unit and real create/navigate/snapshot suites.
+The earlier `camoufox-js` 0.11.1 / Playwright 1.61.1 pairing sent an unsupported
+`Browser.setDefaultViewport.viewport.isMobile` field to the published Camoufox
+bundles. Do not relax either pin without a clean dependency install, the unit
+suite, and a real create/navigate/snapshot smoke against the candidate browser
+bundle.
 
 ## Docker
 
