@@ -384,3 +384,40 @@ describe('session expiry _closing flag', () => {
     expect(session._closing).toBeUndefined();
   });
 });
+
+describe('closeSession replacement safety', () => {
+  test('stale teardown does not delete a replacement session', async () => {
+    const sessions = new Map();
+    const key = 'user-1';
+    const oldSession = {};
+    const replacementSession = {};
+    sessions.set(key, oldSession);
+
+    let finishContextClose;
+    const contextClose = new Promise((resolve) => { finishContextClose = resolve; });
+    const closeOldSession = (async () => {
+      await contextClose;
+      if (sessions.get(key) === oldSession) {
+        sessions.delete(key);
+      }
+    })();
+
+    sessions.set(key, replacementSession);
+    finishContextClose();
+    await closeOldSession;
+
+    expect(sessions.get(key)).toBe(replacementSession);
+  });
+
+  test('server closeSession guards deletion by session identity', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const source = await readFile(new URL('../../server.js', import.meta.url), 'utf8');
+    const start = source.indexOf('async function closeSession');
+    const end = source.indexOf('async function closeAllSessions', start);
+    const closeSessionSource = source.slice(start, end);
+
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    expect(closeSessionSource).toContain('if (sessions.get(key) === session) {');
+  });
+});

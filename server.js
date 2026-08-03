@@ -1228,7 +1228,11 @@ async function closeSession(userId, session, {
   }
 
   await session.context.close().catch(() => {});
-  sessions.delete(key);
+  // A replacement may have been published while this session was closing.
+  // Only remove the mapping when it still points to the session we tore down.
+  if (sessions.get(key) === session) {
+    sessions.delete(key);
+  }
   await pluginEvents.emitAsync('session:destroyed', { userId: key, reason });
 
   refreshActiveTabsGauge();
