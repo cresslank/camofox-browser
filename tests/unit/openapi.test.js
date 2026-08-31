@@ -14,7 +14,8 @@ import { readFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import swaggerJsdoc from 'swagger-jsdoc';
-import { swaggerDefinition } from '../../lib/openapi.js';
+import express from 'express';
+import { mountDocs, swaggerDefinition } from '../../lib/openapi.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const serverPath = join(__dirname, '..', '..', 'server.js');
@@ -213,5 +214,45 @@ describe('OpenAPI spec', () => {
       throw new Error('openapi.json not found -- run: npm run generate-openapi');
     }
     expect(committed).toEqual(spec);
+  });
+
+  test('interactive docs use the same generated OpenAPI document', () => {
+    const rootSpec = readFileSync(join(__dirname, '..', '..', 'openapi.json'), 'utf8');
+    const docsSpec = readFileSync(join(__dirname, '..', '..', 'docs', 'openapi.json'), 'utf8');
+    const docsHtml = readFileSync(join(__dirname, '..', '..', 'docs', 'api.html'), 'utf8');
+
+    expect(docsSpec).toBe(rootSpec);
+    expect(docsHtml).toContain('"specUrl": "./openapi.json"');
+  });
+
+  test('published package includes both machine-readable and interactive docs', () => {
+    expect(pkg.files).toEqual(expect.arrayContaining(['openapi.json', 'docs/']));
+    expect(pkg.dependencies['swagger-jsdoc']).toBeUndefined();
+    expect(pkg.devDependencies['swagger-jsdoc']).toBeDefined();
+  });
+
+  test('mounted machine-readable and interactive docs serve the committed spec', async () => {
+    const app = express();
+    mountDocs(app);
+    const server = await new Promise(resolve => {
+      const listening = app.listen(0, () => resolve(listening));
+    });
+
+    try {
+      const baseUrl = `http://127.0.0.1:${server.address().port}`;
+      const [apiResponse, docsResponse, docsSpecResponse] = await Promise.all([
+        fetch(`${baseUrl}/openapi.json`),
+        fetch(`${baseUrl}/docs`),
+        fetch(`${baseUrl}/docs/openapi.json`),
+      ]);
+
+      expect(apiResponse.status).toBe(200);
+      expect(docsResponse.status).toBe(200);
+      expect(docsResponse.headers.get('content-type')).toContain('text/html');
+      expect(await apiResponse.json()).toEqual(spec);
+      expect(await docsSpecResponse.json()).toEqual(spec);
+    } finally {
+      await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    }
   });
 });

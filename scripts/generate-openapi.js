@@ -5,7 +5,7 @@
  * Run: node scripts/generate-openapi.js
  */
 
-import { writeFileSync } from 'fs';
+import { mkdirSync, writeFileSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import swaggerJsdoc from 'swagger-jsdoc';
@@ -19,6 +19,10 @@ const spec = swaggerJsdoc({
   apis: [join(root, 'server.js')],
 });
 
-const out = join(root, 'openapi.json');
-writeFileSync(out, JSON.stringify(spec, null, 2) + '\n');
-console.log(`Wrote ${Object.keys(spec.paths).length} paths to openapi.json`);
+const serialized = JSON.stringify(spec, null, 2) + '\n';
+const outputs = [join(root, 'openapi.json'), join(root, 'docs', 'openapi.json')];
+for (const out of outputs) {
+  mkdirSync(dirname(out), { recursive: true });
+  writeFileSync(out, serialized);
+}
+console.log(`Wrote ${Object.keys(spec.paths).length} paths to openapi.json and docs/openapi.json`);
