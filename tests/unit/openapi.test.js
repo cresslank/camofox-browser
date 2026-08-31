@@ -137,6 +137,21 @@ describe('OpenAPI spec', () => {
     expect(createTab.requestBody.content['application/json']).toBeDefined();
   });
 
+  test('POST /tabs documents the blockedResourceTypes request and response contract', () => {
+    const createTab = spec.paths['/tabs']?.post;
+    const requestSchema = createTab.requestBody.content['application/json'].schema;
+    const responseSchema = createTab.responses[200].content['application/json'].schema;
+
+    for (const schema of [
+      requestSchema.properties.blockedResourceTypes,
+      responseSchema.properties.blockedResourceTypes,
+    ]) {
+      expect(schema.type).toBe('array');
+      expect(schema.uniqueItems).toBe(true);
+      expect(schema.items).toEqual({ type: 'string', enum: ['image', 'media', 'font'] });
+    }
+  });
+
   test('legacy routes are marked deprecated', () => {
     const legacyPaths = {
       '/act': 'post',

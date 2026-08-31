@@ -3033,6 +3033,13 @@ app.post('/pressure/cleanup', async (req, res) => {
  *               trace:
  *                 type: boolean
  *                 description: Enable Playwright tracing for this session (screenshots, DOM snapshots, network). Must be set on first tab creation; cannot be added to an existing session.
+ *               blockedResourceTypes:
+ *                 type: array
+ *                 description: Resource types to block for this tab, including initial navigation and recovery retries.
+ *                 uniqueItems: true
+ *                 items:
+ *                   type: string
+ *                   enum: [image, media, font]
  *     responses:
  *       200:
  *         description: Tab created.
@@ -3045,6 +3052,13 @@ app.post('/pressure/cleanup', async (req, res) => {
  *                   type: string
  *                 url:
  *                   type: string
+ *                 blockedResourceTypes:
+ *                   type: array
+ *                   description: Canonical resource types blocked for the tab.
+ *                   uniqueItems: true
+ *                   items:
+ *                     type: string
+ *                     enum: [image, media, font]
  *       400:
  *         description: Missing required fields.
  *         content:

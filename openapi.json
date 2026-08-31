@@ -437,6 +437,19 @@
                   "trace": {
                     "type": "boolean",
                     "description": "Enable Playwright tracing for this session (screenshots, DOM snapshots, network). Must be set on first tab creation; cannot be added to an existing session."
+                  },
+                  "blockedResourceTypes": {
+                    "type": "array",
+                    "description": "Resource types to block for this tab, including initial navigation and recovery retries.",
+                    "uniqueItems": true,
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "image",
+                        "media",
+                        "font"
+                      ]
+                    }
                   }
                 }
               }
@@ -456,6 +469,19 @@
                     },
                     "url": {
                       "type": "string"
+                    },
+                    "blockedResourceTypes": {
+                      "type": "array",
+                      "description": "Canonical resource types blocked for the tab.",
+                      "uniqueItems": true,
+                      "items": {
+                        "type": "string",
+                        "enum": [
+                          "image",
+                          "media",
+                          "font"
+                        ]
+                      }
                     }
                   }
                 }
