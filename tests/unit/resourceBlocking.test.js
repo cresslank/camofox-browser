@@ -1,8 +1,6 @@
 import { describe, expect, jest, test } from '@jest/globals';
-import { readFileSync } from 'node:fs';
 import { applyResourceBlocking, normalizeBlockedResourceTypes } from '../../lib/resource-blocking.js';
-
-const serverSource = readFileSync(new URL('../../server.js', import.meta.url), 'utf8');
+import { createRoutedReplacementPage } from '../../lib/replacement-page.js';
 
 describe('resource blocking', () => {
   test('normalizes supported aliases and ignores unknown values', () => {
@@ -47,14 +45,57 @@ describe('resource blocking', () => {
     expect(page.route).not.toHaveBeenCalled();
   });
 
-  test('configures both initial and proxy-retry tab creation paths', () => {
-    const configuredCreationCalls = serverSource.match(
-      /createPageWithRecoveryForUser\(userId, session, \{\s*trace: !!trace,\s*blockedResourceTypes: blockedTypes,\s*\}\)/g,
-    );
-    expect(configuredCreationCalls).toHaveLength(2);
+  test.each(['Google rotation', 'navigation-context recovery'])(
+    '%s routes a replacement before making it available',
+    async () => {
+      const page = { id: 'replacement' };
+      const lease = { id: 'lease' };
+      let finishRouting;
+      const routing = new Promise(resolve => { finishRouting = resolve; });
+      const createLeasedPage = jest.fn(async () => ({ page, lease }));
+      const applyBlocking = jest.fn(async () => {
+        await routing;
+        return ['image', 'media', 'font'];
+      });
+      const closeLeasedPage = jest.fn();
 
-    const proxyRetry = serverSource.slice(serverSource.indexOf("browserRestartsTotal.labels('proxy_retry')"));
-    expect(proxyRetry.indexOf('blockedResourceTypes: blockedTypes')).toBeGreaterThan(-1);
-    expect(proxyRetry.indexOf('blockedResourceTypes: blockedTypes')).toBeLessThan(proxyRetry.indexOf('const retryGroup'));
+      let exposed = false;
+      const replacementPromise = createRoutedReplacementPage({
+        session: { id: 'fresh-context' },
+        blockedResourceTypes: ['images', 'video', 'fonts'],
+        createLeasedPage,
+        closeLeasedPage,
+        applyResourceBlocking: applyBlocking,
+      }).then(result => { exposed = true; return result; });
+
+      await Promise.resolve();
+      expect(exposed).toBe(false);
+      expect(applyBlocking).toHaveBeenCalledWith(page, ['image', 'media', 'font']);
+      finishRouting();
+
+      await expect(replacementPromise).resolves.toEqual({
+        page,
+        lease,
+        blockedResourceTypes: ['image', 'media', 'font'],
+      });
+      expect(closeLeasedPage).not.toHaveBeenCalled();
+    },
+  );
+
+  test('closes and withholds a replacement whose routing setup fails', async () => {
+    const page = { id: 'replacement' };
+    const lease = { id: 'lease' };
+    const session = { id: 'fresh-context' };
+    const routeError = new Error('route setup failed');
+    const closeLeasedPage = jest.fn();
+
+    await expect(createRoutedReplacementPage({
+      session,
+      blockedResourceTypes: ['image'],
+      createLeasedPage: async () => ({ page, lease }),
+      closeLeasedPage,
+      applyResourceBlocking: async () => { throw routeError; },
+    })).rejects.toBe(routeError);
+    expect(closeLeasedPage).toHaveBeenCalledWith(session, page, lease);
   });
 });

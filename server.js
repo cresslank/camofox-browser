@@ -36,6 +36,7 @@ import { cleanupOrphanedTempFiles, cleanupStaleFirefoxProfiles, removeXvfbDispla
 import { coalesceInflight } from './lib/inflight.js';
 import { createPageWithSessionRecovery } from './lib/new-page-recovery.js';
 import { applyResourceBlocking, normalizeBlockedResourceTypes } from './lib/resource-blocking.js';
+import { createRoutedReplacementPage } from './lib/replacement-page.js';
 import { resolveUploadPaths } from './lib/upload-paths.js';
 import { acquirePageLease, hasActivePageLeases, isPageLeased, releasePageLease, setLeasedPage } from './lib/page-lease.js';
 import {
@@ -1949,7 +1950,7 @@ function tabNotFoundResponse(res, tabId) {
   return res.status(404).json({ error: 'Tab not found' });
 }
 
-function createTabState(page) {
+function createTabState(page, blockedResourceTypes = []) {
   const healthTracker = createTabHealthTracker(page);
   const tabState = {
     page,
@@ -1969,6 +1970,7 @@ function createTabState(page) {
     pressureObservedAt: Date.now(),
     pressureObservedToolCalls: 0,
     crashed: false,
+    blockedResourceTypes: normalizeBlockedResourceTypes(blockedResourceTypes),
   };
   page?.on?.('crash', () => { tabState.crashed = true; });
   return tabState;
@@ -2170,8 +2172,15 @@ async function rotateGoogleTab(userId, sessionKey, tabId, previousTabState, reas
   }
   const session = await getSession(userId);
   const group = getTabGroup(session, sessionKey);
-  const { page, lease } = await createLeasedPage(session);
-  const tabState = createTabState(page);
+  const replacement = await createRoutedReplacementPage({
+    session,
+    blockedResourceTypes: previousTabState.blockedResourceTypes,
+    createLeasedPage,
+    closeLeasedPage,
+    applyResourceBlocking,
+  });
+  const { page, lease } = replacement;
+  const tabState = createTabState(page, replacement.blockedResourceTypes);
   tabState.googleRetryCount = (previousTabState.googleRetryCount || 0) + 1;
   tabState.lastRequestedUrl = previousTabState.lastRequestedUrl;
   attachDownloadListener(tabState, tabId, log, pluginEvents, userId);
@@ -3135,7 +3144,7 @@ app.post('/tabs', async (req, res) => {
       const group = getTabGroup(session, resolvedSessionKey);
 
       const tabId = fly.makeTabId();
-      let tabState = createTabState(page);
+      let tabState = createTabState(page, blockedTypes);
       attachDownloadListener(tabState, tabId, log, pluginEvents, userId);
       group.set(tabId, tabState);
       releasePageLease(session, lease);
@@ -3168,7 +3177,7 @@ app.post('/tabs', async (req, res) => {
             session = retryCreatedPage.session;
             const retryGroup = getTabGroup(session, resolvedSessionKey);
             const { page: retryPage, lease: retryLease } = retryCreatedPage;
-            tabState = createTabState(retryPage);
+            tabState = createTabState(retryPage, blockedTypes);
             tabState.lastRequestedUrl = url;
             attachDownloadListener(tabState, tabId, log, pluginEvents, userId);
             retryGroup.set(tabId, tabState);
@@ -3349,8 +3358,15 @@ app.post('/tabs/:tabId/navigate', async (req, res) => {
           }
           session = await getSession(userId);
           const group = getTabGroup(session, currentSessionKey);
-          const { page, lease } = await createLeasedPage(session);
-          tabState = createTabState(page);
+          const replacement = await createRoutedReplacementPage({
+            session,
+            blockedResourceTypes: tabState.blockedResourceTypes,
+            createLeasedPage,
+            closeLeasedPage,
+            applyResourceBlocking,
+          });
+          const { page, lease } = replacement;
+          tabState = createTabState(page, replacement.blockedResourceTypes);
           tabState.googleRetryCount = previousRetryCount + 1;
           attachDownloadListener(tabState, tabId, log, pluginEvents, userId);
           group.set(tabId, tabState);
@@ -3548,6 +3564,7 @@ app.get('/tabs/:tabId/snapshot', async (req, res) => {
             tabState.lastSnapshot = rotated.tabState.lastSnapshot;
             tabState.lastRequestedUrl = rotated.tabState.lastRequestedUrl;
             tabState.googleRetryCount = rotated.tabState.googleRetryCount;
+            tabState.blockedResourceTypes = rotated.tabState.blockedResourceTypes;
           }
         }
       }

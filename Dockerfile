@@ -9,6 +9,7 @@ FROM node:22-trixie-slim AS camofox-browser
 ARG CAMOUFOX_VERSION=135.0.1
 ARG CAMOUFOX_RELEASE=beta.24
 ARG ARCH=x86_64
+ARG CAMOFOX_SKIP_BROWSER_DOWNLOAD=0
 
 # Install dependencies for Camoufox (Firefox-based)
 RUN apt-get update && apt-get install -y \
@@ -53,13 +54,18 @@ RUN apt-get update && apt-get install -y \
 # build dies three commands later on "unzip: cannot find zipfile directory", which
 # points at the archive rather than at the URL that was actually wrong. Note the Linux
 # arm asset is named lin.arm64.zip -- pass --build-arg ARCH=arm64, not aarch64.
-RUN mkdir -p /root/.cache/camoufox \
-    && curl -fL -o /tmp/camoufox.zip "https://github.com/daijro/camoufox/releases/download/v${CAMOUFOX_VERSION}-${CAMOUFOX_RELEASE}/camoufox-${CAMOUFOX_VERSION}-${CAMOUFOX_RELEASE}-lin.${ARCH}.zip" \
-    && (unzip -q /tmp/camoufox.zip -d /root/.cache/camoufox || true) \
-    && rm /tmp/camoufox.zip \
-    && chmod -R 755 /root/.cache/camoufox \
-    && echo "{\"version\":\"${CAMOUFOX_VERSION}\",\"release\":\"${CAMOUFOX_RELEASE}\"}" > /root/.cache/camoufox/version.json \
-    && test -f /root/.cache/camoufox/camoufox-bin && echo "Camoufox installed successfully"
+RUN if [ "${CAMOFOX_SKIP_BROWSER_DOWNLOAD}" = "1" ]; then \
+      echo "Skipping Camoufox download for browser-free image smoke"; \
+    else \
+      mkdir -p /root/.cache/camoufox \
+      && curl -fL -o /tmp/camoufox.zip "https://github.com/daijro/camoufox/releases/download/v${CAMOUFOX_VERSION}-${CAMOUFOX_RELEASE}/camoufox-${CAMOUFOX_VERSION}-${CAMOUFOX_RELEASE}-lin.${ARCH}.zip" \
+      && (unzip -q /tmp/camoufox.zip -d /root/.cache/camoufox || true) \
+      && rm /tmp/camoufox.zip \
+      && chmod -R 755 /root/.cache/camoufox \
+      && echo "{\"version\":\"${CAMOUFOX_VERSION}\",\"release\":\"${CAMOUFOX_RELEASE}\"}" > /root/.cache/camoufox/version.json \
+      && test -f /root/.cache/camoufox/camoufox-bin \
+      && echo "Camoufox installed successfully"; \
+    fi
 
 # Install yt-dlp for YouTube transcript extraction (no browser needed)
 RUN curl -L -o /usr/local/bin/yt-dlp "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp" \
@@ -76,12 +82,14 @@ COPY scripts/ ./scripts/
 # one fails at build time on any Debian release, that one at runtime on bookworm.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential python3 \
-    && npm ci --omit=dev \
+    && CAMOFOX_SKIP_DOWNLOAD=${CAMOFOX_SKIP_BROWSER_DOWNLOAD} npm ci --omit=dev \
     && apt-get purge -y --auto-remove build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 COPY server.js ./
 COPY camofox.config.json ./
+COPY openapi.json ./
+COPY docs/ ./docs/
 COPY lib/ ./lib/
 # lib/cookies.js is a compatibility re-export from ../mcp/lib/cookies.mjs, so mcp/
 # must ship even though the MCP server itself is not run here. Without it the

@@ -23,6 +23,7 @@ describe('version synchronization', () => {
     await cp(join(ROOT, 'scripts', 'sync-version.js'), join(fixture, 'scripts', 'sync-version.js'));
 
     await writeFile(join(fixture, 'package.json'), JSON.stringify({ type: 'module', version: '9.8.7' }));
+    await writeFile(join(fixture, 'camofox.config.json'), JSON.stringify({ version: '1.0.0', plugins: {} }));
     await writeFile(join(fixture, 'openclaw.plugin.json'), JSON.stringify({ version: '1.0.0' }));
     await writeFile(join(fixture, 'mcp', 'package.json'), JSON.stringify({ version: '1.0.0' }));
     await writeFile(join(fixture, 'mcp', 'package-lock.json'), JSON.stringify({
@@ -35,12 +36,20 @@ describe('version synchronization', () => {
     await execFile(process.execPath, [join(fixture, 'scripts', 'sync-version.js')]);
 
     const plugin = JSON.parse(await readFile(join(fixture, 'openclaw.plugin.json'), 'utf8'));
+    const config = JSON.parse(await readFile(join(fixture, 'camofox.config.json'), 'utf8'));
     const mcpPackage = JSON.parse(await readFile(join(fixture, 'mcp', 'package.json'), 'utf8'));
     const mcpLock = JSON.parse(await readFile(join(fixture, 'mcp', 'package-lock.json'), 'utf8'));
 
     expect(plugin.version).toBe('9.8.7');
+    expect(config.version).toBe('9.8.7');
     expect(mcpPackage.version).toBe('9.8.7');
     expect(mcpLock.version).toBe('9.8.7');
     expect(mcpLock.packages[''].version).toBe('9.8.7');
+  });
+
+  test('npm version stages every synchronized identity and generated spec', async () => {
+    const pkg = JSON.parse(await readFile(join(ROOT, 'package.json'), 'utf8'));
+    expect(pkg.scripts.version).toContain('camofox.config.json');
+    expect(pkg.scripts.version).toContain('docs/openapi.json');
   });
 });

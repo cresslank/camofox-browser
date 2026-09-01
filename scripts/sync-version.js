@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Sync openclaw.plugin.json and mcp package versions with package.json.
+ * Sync all package/config identities with package.json.
  * Run via: npm run version:sync
  * Auto-runs on npm version via the "version" lifecycle script.
  */
@@ -13,6 +13,16 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
 
 const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
+
+const configPath = join(root, 'camofox.config.json');
+const config = JSON.parse(await readFile(configPath, 'utf8'));
+if (config.version !== pkg.version) {
+  config.version = pkg.version;
+  await writeFile(configPath, JSON.stringify(config, null, 2) + '\n');
+  console.log(`camofox.config.json version synced to ${pkg.version}`);
+} else {
+  console.log(`camofox.config.json already at ${pkg.version}`);
+}
 
 const pluginPath = join(root, 'openclaw.plugin.json');
 const plugin = JSON.parse(await readFile(pluginPath, 'utf8'));
