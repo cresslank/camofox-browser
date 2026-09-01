@@ -1,0 +1,33 @@
+# Version-control and local configuration
+.git
+.github
+.env
+.env.*
+**/.env
+**/.env.*
+
+# Dependency trees must always be resolved by the image build.
+node_modules
+**/node_modules
+**/node_modules/**
+
+# Generated build, test, and package artifacts
+coverage
+**/coverage
+.nyc_output
+**/.nyc_output
+dist
+build
+test-results
+**/test-results
+playwright-report
+**/playwright-report
+*.tgz
+**/*.tgz
+*.log
+**/*.log
+npm-debug.log*
+
+# Local browser/download caches
+.camoufox
+**/.camoufox

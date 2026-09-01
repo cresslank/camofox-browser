@@ -92,6 +92,9 @@ COPY scripts/ ./scripts/
 # does not preserve +x permission bits in Docker build contexts.
 RUN sh scripts/install-plugin-deps.sh
 
+ARG SOURCE_REVISION
+LABEL org.opencontainers.image.revision="${SOURCE_REVISION}"
+
 ENV NODE_ENV=production
 ENV CAMOFOX_PORT=9377
 

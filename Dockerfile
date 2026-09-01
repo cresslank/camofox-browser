@@ -103,6 +103,9 @@ COPY scripts/ ./scripts/
 # Install default plugin dependencies (apt packages + post-install hooks)
 RUN sh scripts/install-plugin-deps.sh
 
+ARG SOURCE_REVISION
+LABEL org.opencontainers.image.revision="${SOURCE_REVISION}"
+
 ENV NODE_ENV=production
 ENV CAMOFOX_PORT=9377
 
