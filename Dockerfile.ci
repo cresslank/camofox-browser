@@ -93,6 +93,7 @@ COPY scripts/ ./scripts/
 RUN sh scripts/install-plugin-deps.sh
 
 ARG SOURCE_REVISION
+RUN test -n "${SOURCE_REVISION}" || (echo >&2 "SOURCE_REVISION is required"; exit 1)
 LABEL org.opencontainers.image.revision="${SOURCE_REVISION}"
 
 ENV NODE_ENV=production

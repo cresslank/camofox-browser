@@ -1,6 +1,10 @@
 # Version-control and local configuration
 .git
 .github
+**/.git
+**/.git/**
+**/.github
+**/.github/**
 .env
 .env.*
 **/.env
@@ -11,23 +15,74 @@ node_modules
 **/node_modules
 **/node_modules/**
 
-# Generated build, test, and package artifacts
+# Generated build, test, package, log, and cache artifacts
 coverage
 **/coverage
+**/coverage/**
 .nyc_output
 **/.nyc_output
+**/.nyc_output/**
 dist
+**/dist
+**/dist/**
 build
+**/build
+**/build/**
+out
+**/out
+**/out/**
+target
+**/target
+**/target/**
 test-results
 **/test-results
+**/test-results/**
 playwright-report
 **/playwright-report
+**/playwright-report/**
+logs
+**/logs
+**/logs/**
+cache
+**/cache
+**/cache/**
+.cache
+**/.cache
+**/.cache/**
 *.tgz
 **/*.tgz
 *.log
 **/*.log
 npm-debug.log*
+**/npm-debug.log*
 
-# Local browser/download caches
+# Local browser/download and common tool caches
 .camoufox
 **/.camoufox
+**/.camoufox/**
+**/.pytest_cache
+**/.pytest_cache/**
+**/.eslintcache
+**/.parcel-cache
+**/.parcel-cache/**
+**/.turbo
+**/.turbo/**
+**/.next
+**/.next/**
+**/.nuxt
+**/.nuxt/**
+**/.vite
+**/.vite/**
+
+# Editor temporary files and operating-system residue
+**/.idea
+**/.idea/**
+**/.vscode
+**/.vscode/**
+**/.DS_Store
+**/Thumbs.db
+**/Desktop.ini
+**/._*
+**/*.swp
+**/*.swo
+**/*~

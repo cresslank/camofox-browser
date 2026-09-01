@@ -125,6 +125,7 @@
     "start": "node server.js",
     "mcp": "node mcp/server.mjs",
     "test:mcp": "npm ci --prefix mcp && node scripts/test-mcp.mjs && node scripts/test-mcp-package.mjs",
+    "test:docker-publication": "bash scripts/test-docker-publication.sh",
     "test:unit": "NODE_OPTIONS='--experimental-vm-modules' jest --runInBand --forceExit tests/unit",
     "test": "npm run test:unit && npm run test:e2e && npm run test:plugins",
     "test:e2e": "NODE_OPTIONS='--experimental-vm-modules' jest --config jest.config.e2e.cjs --runInBand --forceExit",

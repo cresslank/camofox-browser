@@ -45,6 +45,8 @@ jobs:
           context: .
           file: Dockerfile.ci
           platforms: linux/amd64,linux/arm64
+          build-args: |
+            SOURCE_REVISION=${{ github.sha }}
           push: true
           tags: |
             ghcr.io/jo-inc/camofox-browser:${{ env.VERSION }}

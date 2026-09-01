@@ -56,6 +56,10 @@ $CamoufoxZip = Join-Path $DistDir "camoufox-$Arch.zip"
 $YtDlpBin = Join-Path $DistDir "yt-dlp-$Arch"
 $ImageTag = "camofox-browser:$CamoufoxVersion-$Arch"
 $ContainerPort = 9377
+$SourceRevision = (& git -C $ProjectRoot rev-parse --verify 'HEAD^{commit}').Trim()
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($SourceRevision)) {
+    throw 'Unable to resolve SOURCE_REVISION from Git HEAD.'
+}
 
 # Map architecture to upstream release filenames
 if ($Arch -eq 'aarch64') {
@@ -105,6 +109,7 @@ function Invoke-Build {
         --build-arg "ARCH=$Arch" `
         --build-arg "CAMOUFOX_VERSION=$CamoufoxVersion" `
         --build-arg "CAMOUFOX_RELEASE=$CamoufoxRelease" `
+        --build-arg "SOURCE_REVISION=$SourceRevision" `
         -t $ImageTag `
         -f (Join-Path $ProjectRoot 'Dockerfile') `
         $ProjectRoot

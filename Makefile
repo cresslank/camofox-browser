@@ -1,5 +1,6 @@
 VERSION  ?= 135.0.1
 RELEASE  ?= beta.24
+SOURCE_REVISION ?= $(shell git rev-parse --verify HEAD 2>/dev/null)
 
 # Auto-detect host architecture; map arm64 (macOS) → aarch64
 UNAME_ARCH := $(shell uname -m)
@@ -29,10 +30,12 @@ YTDLP_URL    := https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp
 
 ## Build the Docker image for the current ARCH (default: x86_64)
 build: fetch
+	@test -n "$(SOURCE_REVISION)" || { echo >&2 "SOURCE_REVISION is required (unable to resolve Git HEAD)"; exit 1; }
 	docker build --no-cache \
 	  --build-arg ARCH=$(CAMOUFOX_ARCH) \
 	  --build-arg CAMOUFOX_VERSION=$(VERSION) \
 	  --build-arg CAMOUFOX_RELEASE=$(RELEASE) \
+	  --build-arg SOURCE_REVISION="$(SOURCE_REVISION)" \
 	  -t $(IMAGE) .
 
 ## Convenience targets
