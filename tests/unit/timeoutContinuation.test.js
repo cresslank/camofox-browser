@@ -28,6 +28,21 @@ describe('timed-out tab operations', () => {
     expect(clickRoute).toContain("destroyTimedOutTab(session, tabId, 'operation_timeout', userId)");
   });
 
+  test('retries timed-out actionability through bounded force and DOM paths before raw mouse fallback', () => {
+    const source = readFileSync(new URL('../../server.js', import.meta.url), 'utf8');
+    const clickStart = source.indexOf("app.post('/tabs/:tabId/click'");
+    const clickRoute = source.slice(clickStart, source.indexOf("app.post('/tabs/:tabId/upload'", clickStart));
+    const timeoutBranchStart = clickRoute.indexOf("err.message.toLowerCase().includes('timeout')");
+    const timeoutBranch = clickRoute.slice(timeoutBranchStart, clickRoute.indexOf('\n          } else {', timeoutBranchStart));
+
+    const forceRetry = timeoutBranch.indexOf("click({ timeout: 3000, force: true })");
+    const domFallback = timeoutBranch.indexOf('dispatchDomClick(locator)');
+    const rawMouseFallback = timeoutBranch.indexOf('dispatchMouseSequence(locator)');
+    expect(forceRetry).toBeGreaterThanOrEqual(0);
+    expect(domFallback).toBeGreaterThan(forceRetry);
+    expect(rawMouseFallback).toBeGreaterThan(domFallback);
+  });
+
   test('returns a stable recoverable error after timeout cleanup', () => {
     const error = Object.assign(new Error('action timed out after 5000ms'), { code: 'tab_timeout' });
 

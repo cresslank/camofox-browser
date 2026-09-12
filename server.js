@@ -4173,6 +4173,21 @@ app.post('/tabs/:tabId/click', async (req, res) => {
         
         log('info', 'mouse sequence dispatched', { x: x.toFixed(0), y: y.toFixed(0) });
       };
+
+      // Playwright actionability and raw mouse commands can both stall in an
+      // otherwise responsive Camoufox tab after sustained context churn. A DOM
+      // activation is intentionally attempted only after normal and forced
+      // trusted clicks fail. It uses no caller-provided script and leaves the
+      // bounded, tab-destroying native sequence as the final fallback.
+      const dispatchDomClick = async (locator) => {
+        const timeout = Math.max(1, Math.min(3000, remainingBudget()));
+        await locator.evaluate((element) => {
+          if (typeof element.focus === 'function') element.focus({ preventScroll: true });
+          if (typeof element.click !== 'function') throw new Error('Element does not support click()');
+          element.click();
+        }, undefined, { timeout });
+        log('info', 'DOM click fallback dispatched');
+      };
       
       // On Google SERPs, skip the normal click attempt (always intercepted by overlays)
       // and go directly to force click -- saves 5s timeout per click
@@ -4214,14 +4229,36 @@ app.post('/tabs/:tabId/click', async (req, res) => {
             try {
               await click({ timeout: 3000, force: true });
             } catch (forceErr) {
-              // Fallback 2: Full mouse event sequence for stubborn JS handlers
-              log('warn', 'force click failed, trying mouse sequence');
-              await dispatchMouseSequence(locator);
+              // A forced trusted click can still wedge in Camoufox's mouse
+              // protocol. Prefer bounded DOM activation before issuing raw
+              // mouse commands into that same queue.
+              log('warn', 'force click failed, trying DOM click fallback');
+              try {
+                await dispatchDomClick(locator);
+              } catch (domErr) {
+                log('warn', 'DOM click fallback failed, trying mouse sequence');
+                await dispatchMouseSequence(locator);
+              }
             }
           } else if (err.message.includes('not visible') || err.message.toLowerCase().includes('timeout')) {
-            // Fallback 2: Element not responding to click, try mouse sequence
-            log('warn', 'click timeout, trying mouse sequence');
-            await dispatchMouseSequence(locator);
+            // A normal Playwright click can exhaust its actionability wait under
+            // aggregate browser load even though the element remains attached and
+            // visible. Retry through Playwright's force path first: unlike the raw
+            // mouse fallback it retains Playwright's cancellable action boundary,
+            // and it avoids queueing page.mouse commands behind the timed-out
+            // action. Keep the native sequence as the final compatibility fallback.
+            log('warn', 'click timeout, retrying with force');
+            try {
+              await click({ timeout: 3000, force: true });
+            } catch (forceErr) {
+              log('warn', 'force click failed after timeout, trying DOM click fallback');
+              try {
+                await dispatchDomClick(locator);
+              } catch (domErr) {
+                log('warn', 'DOM click fallback failed after timeout, trying mouse sequence');
+                await dispatchMouseSequence(locator);
+              }
+            }
           } else {
             throw err;
           }
