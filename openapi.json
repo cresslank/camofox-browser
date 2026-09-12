@@ -911,6 +911,11 @@
                   "doubleClick": {
                     "type": "boolean"
                   },
+                  "force": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Explicitly bypass Playwright actionability checks. Never selected automatically."
+                  },
                   "coordinates": {
                     "type": "object",
                     "properties": {
@@ -959,7 +964,17 @@
             }
           },
           "409": {
-            "description": "Page changed during the click; caller should take a fresh snapshot and retry with current refs.",
+            "description": "Page changed before dispatch, or dispatch completion was not acknowledged and the outcome is unknown. Unknown outcomes are not retried.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Target is hidden, disabled, detached, outside the viewport, or intercepted.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3041,6 +3056,11 @@
                   },
                   "selector": {
                     "type": "string"
+                  },
+                  "force": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Explicitly bypass actionability checks for click actions; never selected automatically."
                   },
                   "text": {
                     "type": "string"

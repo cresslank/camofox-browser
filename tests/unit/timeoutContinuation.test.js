@@ -17,30 +17,16 @@ describe('timed-out tab operations', () => {
     await stopServer();
   }, 30000);
 
-  test('marks native mouse calls as bounded tab-destroying operations', () => {
+  test('click route delegates to the no-replay semantic boundary and has no bypass fallback', () => {
     const source = readFileSync(new URL('../../server.js', import.meta.url), 'utf8');
     const clickStart = source.indexOf("app.post('/tabs/:tabId/click'");
     const clickRoute = source.slice(clickStart, source.indexOf("app.post('/tabs/:tabId/upload'", clickStart));
 
-    for (const action of ['move', 'down', 'up']) {
-      expect(clickRoute).toContain(`withTimeout(tabState.page.mouse.${action}`);
-    }
+    expect(clickRoute).toContain('dispatchClickOnce({');
+    expect(clickRoute).not.toContain('dispatchDomClick');
+    expect(clickRoute).not.toContain('dispatchMouseSequence');
+    expect(clickRoute).not.toContain('retrying with force');
     expect(clickRoute).toContain("destroyTimedOutTab(session, tabId, 'operation_timeout', userId)");
-  });
-
-  test('retries timed-out actionability through bounded force and DOM paths before raw mouse fallback', () => {
-    const source = readFileSync(new URL('../../server.js', import.meta.url), 'utf8');
-    const clickStart = source.indexOf("app.post('/tabs/:tabId/click'");
-    const clickRoute = source.slice(clickStart, source.indexOf("app.post('/tabs/:tabId/upload'", clickStart));
-    const timeoutBranchStart = clickRoute.indexOf("err.message.toLowerCase().includes('timeout')");
-    const timeoutBranch = clickRoute.slice(timeoutBranchStart, clickRoute.indexOf('\n          } else {', timeoutBranchStart));
-
-    const forceRetry = timeoutBranch.indexOf("click({ timeout: 3000, force: true })");
-    const domFallback = timeoutBranch.indexOf('dispatchDomClick(locator)');
-    const rawMouseFallback = timeoutBranch.indexOf('dispatchMouseSequence(locator)');
-    expect(forceRetry).toBeGreaterThanOrEqual(0);
-    expect(domFallback).toBeGreaterThan(forceRetry);
-    expect(rawMouseFallback).toBeGreaterThan(domFallback);
   });
 
   test('returns a stable recoverable error after timeout cleanup', () => {

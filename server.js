@@ -40,6 +40,7 @@ import { coalesceInflight } from './lib/inflight.js';
 import { INTERACTIVE_ROLES } from './lib/interactive-roles.js';
 import { selectOption } from './lib/select-option.js';
 import { visibleSelectorCandidate } from './lib/visible-selector.js';
+import { dispatchClickOnce } from './lib/click-action.js';
 import { normalizeBrowserKey } from './lib/browser-key.js';
 import { createPageWithSessionRecovery } from './lib/new-page-recovery.js';
 import { applyResourceBlocking, normalizeBlockedResourceTypes } from './lib/resource-blocking.js';
@@ -329,6 +330,7 @@ function sendError(res, err, extraFields = {}) {
   };
   if (code) body.code = code;
   if (recovery) body.recovery = recovery;
+  if (err?.outcome) body.outcome = err.outcome;
   if (err instanceof StaleRefsError) body.ref = err.ref;
   if (status >= 500 && !err.statusCode && !recovery) {
     const req = res.req;
@@ -4081,6 +4083,10 @@ app.post('/tabs/:tabId/wait', async (req, res) => {
  *                 description: CSS selector fallback.
  *               doubleClick:
  *                 type: boolean
+ *               force:
+ *                 type: boolean
+ *                 default: false
+ *                 description: Explicitly bypass Playwright actionability checks. Never selected automatically.
  *               coordinates:
  *                 type: object
  *                 properties:
@@ -4108,7 +4114,13 @@ app.post('/tabs/:tabId/wait', async (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  *       409:
- *         description: Page changed during the click; caller should take a fresh snapshot and retry with current refs.
+ *         description: Page changed before dispatch, or dispatch completion was not acknowledged and the outcome is unknown. Unknown outcomes are not retried.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       422:
+ *         description: Target is hidden, disabled, detached, outside the viewport, or intercepted.
  *         content:
  *           application/json:
  *             schema:
@@ -4118,8 +4130,9 @@ app.post('/tabs/:tabId/click', async (req, res) => {
   const tabId = req.params.tabId;
   
   try {
-    const { userId, ref, selector } = req.body;
+    const { userId, ref, selector, doubleClick = false, force = false } = req.body;
     if (!userId) return res.status(400).json({ error: 'userId required' });
+    if (typeof force !== 'boolean') return res.status(400).json({ error: 'force must be a boolean' });
     const session = sessions.get(normalizeUserId(userId));
     const found = session && findTab(session, tabId);
     if (!found) return tabNotFoundResponse(res, req.params.tabId || req.body?.tabId);
@@ -4137,60 +4150,9 @@ app.post('/tabs/:tabId/click', async (req, res) => {
     const result = await withUserLimit(userId, () => withTabLock(tabId, async () => {
       const clickStart = Date.now();
       const remainingBudget = () => Math.max(0, HANDLER_TIMEOUT_MS - 2000 - (Date.now() - clickStart));
-      // Full mouse event sequence for stubborn JS click handlers (mirrors Swift WebView.swift)
-      // Dispatches: mouseover -> mouseenter -> mousedown -> mouseup -> click
-      const dispatchMouseSequence = async (locator) => {
-        // boundingBox() with no timeout inherits Playwright's 30s default, which
-        // silently eats the entire handler budget when the element detached after
-        // the failed click attempt (the page changed under us). Bound it to the
-        // remaining budget (capped at 3s) so the route fails fast with an
-        // actionable 422 instead of blowing HANDLER_TIMEOUT_MS into a 500.
-        // NOTE: the message deliberately avoids the 'timed out after' phrase so
-        // isTimeoutError() doesn't classify a detached element as a navigation
-        // timeout and destroy the whole session in handleRouteError().
-        const bboxTimeout = Math.max(500, Math.min(3000, remainingBudget()));
-        let box;
-        try {
-          box = await locator.boundingBox({ timeout: bboxTimeout });
-        } catch (e) {
-          const detachedErr = new Error(`Element not actionable: no bounding box within ${bboxTimeout}ms (element likely detached after page change). Call snapshot to refresh refs and retry.`);
-          detachedErr.statusCode = 422;
-          throw detachedErr;
-        }
-        if (!box) throw new Error('Element not visible (no bounding box)');
-        
-        const x = box.x + box.width / 2;
-        const y = box.y + box.height / 2;
-        
-        // Move mouse to element (triggers mouseover/mouseenter)
-        await withTimeout(tabState.page.mouse.move(x, y), Math.max(1, remainingBudget()), 'native mouse move');
-        await tabState.page.waitForTimeout(50);
-        
-        // Full click sequence
-        await withTimeout(tabState.page.mouse.down(), Math.max(1, remainingBudget()), 'native mouse down');
-        await tabState.page.waitForTimeout(50);
-        await withTimeout(tabState.page.mouse.up(), Math.max(1, remainingBudget()), 'native mouse up');
-        
-        log('info', 'mouse sequence dispatched', { x: x.toFixed(0), y: y.toFixed(0) });
-      };
-
-      // Playwright actionability and raw mouse commands can both stall in an
-      // otherwise responsive Camoufox tab after sustained context churn. A DOM
-      // activation is intentionally attempted only after normal and forced
-      // trusted clicks fail. It uses no caller-provided script and leaves the
-      // bounded, tab-destroying native sequence as the final fallback.
-      const dispatchDomClick = async (locator) => {
-        const timeout = Math.max(1, Math.min(3000, remainingBudget()));
-        await locator.evaluate((element) => {
-          if (typeof element.focus === 'function') element.focus({ preventScroll: true });
-          if (typeof element.click !== 'function') throw new Error('Element does not support click()');
-          element.click();
-        }, undefined, { timeout });
-        log('info', 'DOM click fallback dispatched');
-      };
       
-      // On Google SERPs, skip the normal click attempt (always intercepted by overlays)
-      // and go directly to force click -- saves 5s timeout per click
+      // Google navigation still gets its post-click handling below, but it no
+      // longer silently changes a normal request into a forced click.
       const onGoogleSerp = isGoogleSerp(tabState.page.url());
       
       const doClick = async (locatorOrSelector, isLocator) => {
@@ -4207,62 +4169,13 @@ app.post('/tabs/:tabId/click', async (req, res) => {
             log('info', 'click constrained selector to visible match', { selector: locatorOrSelector });
           }
         }
-        const click = async (options) => clickWithDownloadGuard(tabState, () => locator.click(options));
-        
-        if (onGoogleSerp) {
-          try {
-            await click({ timeout: 3000, force: true });
-          } catch (forceErr) {
-            log('warn', 'google force click failed, trying mouse sequence');
-            await dispatchMouseSequence(locator);
-          }
-          return;
-        }
-        
-        try {
-          // First try normal click (respects visibility, enabled, not-obscured)
-          await click({ timeout: 3000 });
-        } catch (err) {
-          // Fallback 1: If intercepted by overlay, retry with force
-          if (err.message.includes('intercepts pointer events')) {
-            log('warn', 'click intercepted, retrying with force');
-            try {
-              await click({ timeout: 3000, force: true });
-            } catch (forceErr) {
-              // A forced trusted click can still wedge in Camoufox's mouse
-              // protocol. Prefer bounded DOM activation before issuing raw
-              // mouse commands into that same queue.
-              log('warn', 'force click failed, trying DOM click fallback');
-              try {
-                await dispatchDomClick(locator);
-              } catch (domErr) {
-                log('warn', 'DOM click fallback failed, trying mouse sequence');
-                await dispatchMouseSequence(locator);
-              }
-            }
-          } else if (err.message.includes('not visible') || err.message.toLowerCase().includes('timeout')) {
-            // A normal Playwright click can exhaust its actionability wait under
-            // aggregate browser load even though the element remains attached and
-            // visible. Retry through Playwright's force path first: unlike the raw
-            // mouse fallback it retains Playwright's cancellable action boundary,
-            // and it avoids queueing page.mouse commands behind the timed-out
-            // action. Keep the native sequence as the final compatibility fallback.
-            log('warn', 'click timeout, retrying with force');
-            try {
-              await click({ timeout: 3000, force: true });
-            } catch (forceErr) {
-              log('warn', 'force click failed after timeout, trying DOM click fallback');
-              try {
-                await dispatchDomClick(locator);
-              } catch (domErr) {
-                log('warn', 'DOM click fallback failed after timeout, trying mouse sequence');
-                await dispatchMouseSequence(locator);
-              }
-            }
-          } else {
-            throw err;
-          }
-        }
+        await dispatchClickOnce({
+          locator,
+          timeout: 3000,
+          force,
+          clickCount: doubleClick ? 2 : undefined,
+          dispatch: options => clickWithDownloadGuard(tabState, () => locator.click(options)),
+        });
       };
       
       if (ref) {
@@ -7050,6 +6963,10 @@ app.get('/snapshot', async (req, res) => {
  *                 type: string
  *               selector:
  *                 type: string
+ *               force:
+ *                 type: boolean
+ *                 default: false
+ *                 description: Explicitly bypass actionability checks for click actions; never selected automatically.
  *               text:
  *                 type: string
  *               key:
@@ -7101,25 +7018,21 @@ app.post('/act', async (req, res) => {
     const result = await withTabLock(targetId, async () => {
       switch (kind) {
         case 'click': {
-          const { ref, selector, doubleClick } = params;
+          const { ref, selector, doubleClick, force = false } = params;
           if (!ref && !selector) {
             throw new Error('ref or selector required');
           }
+          if (typeof force !== 'boolean') throw invalidSelectorError('force must be a boolean');
           
           const doClick = async (locatorOrSelector, isLocator) => {
             const locator = isLocator ? locatorOrSelector : tabState.page.locator(locatorOrSelector);
-            const clickOpts = { timeout: 3000 };
-            if (doubleClick) clickOpts.clickCount = 2;
-            
-            try {
-              await locator.click(clickOpts);
-            } catch (err) {
-              if (err.message.includes('intercepts pointer events')) {
-                await locator.click({ ...clickOpts, force: true });
-              } else {
-                throw err;
-              }
-            }
+            await dispatchClickOnce({
+              locator,
+              timeout: 3000,
+              force,
+              clickCount: doubleClick ? 2 : undefined,
+              dispatch: options => locator.click(options),
+            });
           };
           
           if (ref) {
