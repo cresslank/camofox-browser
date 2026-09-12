@@ -73,6 +73,7 @@ import {
   cancelPendingBrowserLaunch,
   createBrowserLaunchFence,
 } from './lib/browser-lifecycle.js';
+import { createBrowserLauncher } from './lib/browser-launch-harness.js';
 import {
   browserCleanupExitCode,
   browserCloseCompleted,
@@ -89,6 +90,10 @@ import {
 } from './lib/browser-errors.js';
 
 const CONFIG = loadConfig();
+const launchFirefox = createBrowserLauncher(
+  options => firefox.launch(options),
+  CONFIG.testBrowserLaunchHarness,
+);
 
 // --- Crash reporter (opt-in, anonymized GitHub issues) ---
 import { readFileSync } from 'fs';
@@ -718,14 +723,15 @@ let browserLaunchPromise = null;
 let browserLaunchTask = null;
 const browserLaunchFence = createBrowserLaunchFence();
 const browserStartFence = createBrowserLaunchFence();
+const BROWSER_WARM_RETRY_INITIAL_DELAY_MS = CONFIG.testBrowserLaunchHarness?.warmRetryDelayMs ?? 5000;
 let browserWarmRetryTimer = null;
 let browserWarmRetryDeferred = false;
-let browserWarmRetryDeferredDelayMs = 5000;
+let browserWarmRetryDeferredDelayMs = BROWSER_WARM_RETRY_INITIAL_DELAY_MS;
 let shuttingDown = false;
 
 function cancelBrowserWarmRetry() {
   browserWarmRetryDeferred = false;
-  browserWarmRetryDeferredDelayMs = 5000;
+  browserWarmRetryDeferredDelayMs = BROWSER_WARM_RETRY_INITIAL_DELAY_MS;
   if (browserWarmRetryTimer === null) return;
   clearTimeout(browserWarmRetryTimer);
   browserWarmRetryTimer = null;
@@ -784,7 +790,7 @@ function camoufoxInstallRemediation() {
   return 'run `npx camoufox-js fetch` then restart the server';
 }
 
-function scheduleBrowserWarmRetry(delayMs = 5000) {
+function scheduleBrowserWarmRetry(delayMs = BROWSER_WARM_RETRY_INITIAL_DELAY_MS) {
   const decision = browserWarmRetryDecision({
     timerActive: browserWarmRetryTimer !== null,
     browserConnected: browser?.isConnected?.() ?? false,
@@ -798,7 +804,7 @@ function scheduleBrowserWarmRetry(delayMs = 5000) {
     return;
   }
   browserWarmRetryDeferred = false;
-  browserWarmRetryDeferredDelayMs = 5000;
+  browserWarmRetryDeferredDelayMs = BROWSER_WARM_RETRY_INITIAL_DELAY_MS;
   const startToken = browserStartFence.capture();
   browserWarmRetryTimer = setTimeout(async () => {
     browserWarmRetryTimer = null;
@@ -808,8 +814,15 @@ function scheduleBrowserWarmRetry(delayMs = 5000) {
       await ensureBrowser({ startToken });
       log('info', 'background browser warm retry succeeded', { ms: Date.now() - start });
     } catch (err) {
-      if (err?.code === 'BROWSER_START_CANCELLED' || err?.code === 'BROWSER_LAUNCH_CANCELLED') {
-        log('info', 'background browser warm retry cancelled', { reason: err.code });
+      if (
+        err?.code === 'BROWSER_START_CANCELLED'
+        || err?.code === 'BROWSER_LAUNCH_CANCELLED'
+        || shuttingDown
+        || !browserStartFence.isCurrent(startToken)
+      ) {
+        log('info', 'background browser warm retry cancelled', {
+          reason: err?.code || 'BROWSER_START_CANCELLED',
+        });
         return;
       }
       if (isFatalInstallError(err)) {
@@ -1326,7 +1339,7 @@ async function launchBrowserInstance(launchToken) {
           excludeAddons: ['UBO'],
         });
       }
-      const options = await buildLaunchOptionsWithGeoipFallback({
+      const baseLaunchOptions = {
         executable_path: externalCamoufox?.executablePath,
         headless: useVirtualDisplay ? false : !useDesktopWindow,
         os: hostOS,
@@ -1336,11 +1349,16 @@ async function launchBrowserInstance(launchToken) {
         geoip: !!launchProxy,
         virtual_display: vdDisplay,
         exclude_addons: CONFIG.disableDefaultAddons ? ['UBO'] : undefined,
-      }, {
-        attempt,
-        proxyServer: launchProxy?.server || null,
-        proxySession: launchProxy?.sessionId || null,
-      });
+      };
+      // The process-level lifecycle harness bypasses Camoufox bundle discovery
+      // so race tests remain hermetic; the production path is unchanged.
+      const options = CONFIG.testBrowserLaunchHarness
+        ? baseLaunchOptions
+        : await buildLaunchOptionsWithGeoipFallback(baseLaunchOptions, {
+            attempt,
+            proxyServer: launchProxy?.server || null,
+            proxySession: launchProxy?.sessionId || null,
+          });
       options.proxy = normalizePlaywrightProxy(options.proxy);
       // Playwright's launcher defaults handleSIGTERM/SIGINT/SIGHUP to true,
       // registering its own process signal handlers that send Browser.close
@@ -1354,7 +1372,7 @@ async function launchBrowserInstance(launchToken) {
       await pluginEvents.emitAsync('browser:launching', { options });
       if (!browserLaunchFence.isCurrent(launchToken)) throw browserLaunchCancelledError();
 
-      candidateBrowser = await firefox.launch(options);
+      candidateBrowser = await launchFirefox(options);
       if (!browserLaunchFence.isCurrent(launchToken)) throw browserLaunchCancelledError();
 
       if (proxyPool?.canRotateSessions) {
@@ -1459,7 +1477,9 @@ async function ensureBrowser({ startToken = browserStartFence.capture() } = {}) 
   if (browser) return browser;
   if (browserLaunchPromise) return browserLaunchPromise;
   if (browserLaunchTask) throw new Error('browser launch cleanup is still in progress');
-  const launchTimeoutMs = proxyPool?.launchTimeoutMs ?? 60000;
+  const launchTimeoutMs = CONFIG.testBrowserLaunchHarness?.launchTimeoutMs
+    ?? proxyPool?.launchTimeoutMs
+    ?? 60000;
   const launchToken = browserLaunchFence.capture();
   let launchTimer;
   const launchTask = launchBrowserInstance(launchToken);
@@ -1490,7 +1510,13 @@ async function ensureBrowser({ startToken = browserStartFence.capture() } = {}) 
     }),
   ]).catch((err) => {
     if (browserLaunchFence.isCurrent(launchToken)) browserLaunchFence.cancel();
-    if (err?.code === 'BROWSER_LAUNCH_TIMEOUT') scheduleBrowserWarmRetry();
+    if (
+      err?.code === 'BROWSER_LAUNCH_TIMEOUT'
+      && !shuttingDown
+      && browserStartFence.isCurrent(startToken)
+    ) {
+      scheduleBrowserWarmRetry();
+    }
     throw err;
   }).finally(() => {
     clearTimeout(launchTimer);

@@ -153,6 +153,24 @@ describe('loadConfig', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  test('test launch harness is parsed only in NODE_ENV=test', () => {
+    process.env.CAMOFOX_TEST_LAUNCH_EVENTS_PATH = '/tmp/launch-events.jsonl';
+    process.env.CAMOFOX_TEST_LAUNCH_DELAYS_MS = '80, 300';
+    process.env.CAMOFOX_TEST_LAUNCH_TIMEOUT_MS = '20';
+    process.env.CAMOFOX_TEST_WARM_RETRY_DELAY_MS = '15';
+
+    process.env.NODE_ENV = 'production';
+    expect(loadConfig().testBrowserLaunchHarness).toBeNull();
+
+    process.env.NODE_ENV = 'test';
+    expect(loadConfig().testBrowserLaunchHarness).toEqual({
+      eventsPath: '/tmp/launch-events.jsonl',
+      delaysMs: [80, 300],
+      launchTimeoutMs: 20,
+      warmRetryDelayMs: 15,
+    });
+  });
+
   test('disables default addons when CAMOFOX_DISABLE_DEFAULT_ADDONS is set', () => {
     delete process.env.CAMOFOX_DISABLE_DEFAULT_ADDONS;
     expect(loadConfig().disableDefaultAddons).toBe(false);
