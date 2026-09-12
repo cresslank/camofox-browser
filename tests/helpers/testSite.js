@@ -36,6 +36,16 @@ function createTestApp() {
     `);
   });
   
+  // A deterministic upstream failure for navigation error handling tests.
+  app.get('/unavailable', (req, res) => {
+    res.status(503).send('Temporarily unavailable');
+  });
+
+  // A response that never completes, used to exercise navigation timeouts.
+  app.get('/slow-navigation', () => {
+    // Deliberately leave the HTTP response open until the browser aborts it.
+  });
+
   // Page that fires a client-side redirect shortly after DOMContentLoaded
   app.get('/lateRedirect', (req, res) => {
     res.send(`
@@ -149,6 +159,23 @@ function createTestApp() {
         <h1>Form Submitted Successfully</h1>
         <p id="username">Username: ${username || ''}</p>
         <p id="email">Email: ${email || ''}</p>
+      </body></html>
+    `);
+  });
+
+  app.get('/structure', (req, res) => {
+    res.send(`
+      <!DOCTYPE html>
+      <html><head><title>Structure Test</title></head>
+      <body>
+        <form id="report-filters" method="get">
+          <label for="period">Period</label>
+          <select id="period" name="period"><option value="month">Month</option><option value="year" selected>Year</option></select>
+          <label for="from">From</label><input id="from" name="from" value="2022-01-01" />
+          <input id="api_token" name="api_token" value="must-not-appear" />
+          <button id="show-report" type="submit">Show Report</button>
+        </form>
+        <table id="sales"><thead><tr><th>Product</th><th>Quantity</th></tr></thead><tbody><tr><td>Yoga ball</td><td>7</td></tr></tbody></table>
       </body></html>
     `);
   });

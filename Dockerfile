@@ -6,10 +6,12 @@ FROM node:22-trixie-slim AS camofox-browser
 
 # Pinned Camoufox version for reproducible builds
 # Update these when upgrading Camoufox
-ARG CAMOUFOX_VERSION=135.0.1
-ARG CAMOUFOX_RELEASE=beta.24
+ARG CAMOUFOX_VERSION=152.0.4
+ARG CAMOUFOX_RELEASE=beta.28
 ARG ARCH=x86_64
 ARG CAMOFOX_SKIP_BROWSER_DOWNLOAD=0
+ARG YT_DLP_VERSION=2026.08.19
+ARG YT_DLP_SHA256=1fa6733c37ea6fb51c99ad8fe785e7b7e5f3246c9b980230329d4fb72ed8d4d6
 
 # Install dependencies for Camoufox (Firefox-based)
 RUN apt-get update && apt-get install -y \
@@ -67,9 +69,7 @@ RUN if [ "${CAMOFOX_SKIP_BROWSER_DOWNLOAD}" = "1" ]; then \
       && echo "Camoufox installed successfully"; \
     fi
 
-# Install yt-dlp for YouTube transcript extraction (no browser needed)
-RUN curl -L -o /usr/local/bin/yt-dlp "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp" \
-    && chmod 755 /usr/local/bin/yt-dlp
+# yt-dlp is installed and verified by the enabled YouTube plugin hook below.
 
 WORKDIR /app
 
@@ -119,5 +119,7 @@ CMD ["sh", "-c", "node --max-old-space-size=${MAX_OLD_SPACE_SIZE:-128} server.js
 FROM camofox-browser AS with-plugins
 COPY plugins/ ./plugins/
 COPY camofox.config.json ./
+COPY openapi.json ./
+COPY docs/ ./docs/
 COPY scripts/install-plugin-deps.sh /tmp/install-plugin-deps.sh
 RUN /tmp/install-plugin-deps.sh && rm /tmp/install-plugin-deps.sh

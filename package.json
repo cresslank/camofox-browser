@@ -1,6 +1,6 @@
 {
   "name": "@askjo/camofox-browser",
-  "version": "1.14.1",
+  "version": "1.15.0",
   "description": "Headless browser automation server and OpenClaw plugin for AI agents - anti-detection, element refs, and session isolation",
   "type": "module",
   "main": "server.js",
@@ -45,7 +45,6 @@
     "tsconfig.json",
     "openclaw.plugin.json",
     "mcp/",
-    "!mcp/node_modules/",
     "bin/",
     "scripts/",
     "run.sh",
@@ -53,11 +52,12 @@
     "README.md",
     "LICENSE",
     "AGENTS.md",
-    "openapi.json",
-    "docs/",
     "!**/*.test.js",
     "!**/*.test.ts",
-    "!**/*.spec.js"
+    "!**/*.spec.js",
+    "!mcp/node_modules/",
+    "openapi.json",
+    "docs/"
   ],
   "openclaw": {
     "extensions": [
@@ -125,7 +125,6 @@
     "start": "node server.js",
     "mcp": "node mcp/server.mjs",
     "test:mcp": "npm ci --prefix mcp && node scripts/test-mcp.mjs && node scripts/test-mcp-package.mjs",
-    "test:docker-publication": "bash scripts/test-docker-publication.sh",
     "test:unit": "NODE_OPTIONS='--experimental-vm-modules' jest --runInBand --forceExit tests/unit",
     "test": "npm run test:unit && npm run test:e2e && npm run test:plugins",
     "test:e2e": "NODE_OPTIONS='--experimental-vm-modules' jest --config jest.config.e2e.cjs --runInBand --forceExit",
@@ -137,7 +136,8 @@
     "version:sync": "node scripts/sync-version.js",
     "version": "node scripts/sync-version.js && node scripts/generate-openapi.js && git add camofox.config.json openclaw.plugin.json mcp/package.json mcp/package-lock.json openapi.json docs/openapi.json",
     "postinstall": "node scripts/postinstall.js",
-    "fetch-bin": "npx camoufox-js fetch"
+    "fetch-bin": "npx camoufox-js fetch",
+    "test:docker-publication": "bash scripts/test-docker-publication.sh"
   },
   "dependencies": {
     "better-sqlite3": "13.0.1",
@@ -153,16 +153,27 @@
     "@types/node": "^22.0.0",
     "jest": "^30.4.2",
     "pngjs": "^7.0.0",
-    "swagger-jsdoc": "^6.2.8",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "swagger-jsdoc": "^6.2.8"
   },
   "overrides": {
-    "brace-expansion": "5.0.9",
-    "glob": "13.0.6",
-    "js-yaml": "4.3.1",
+    "@jest/reporters": {
+      "glob": "13.0.6"
+    },
     "babel-plugin-istanbul": {
       "test-exclude": "8.0.0"
-    }
+    },
+    "jest-config": {
+      "glob": "13.0.6"
+    },
+    "jest-runtime": {
+      "glob": "13.0.6"
+    },
+    "qs": "6.16.0",
+    "fast-uri": "3.1.7",
+    "hono": "4.13.5",
+    "brace-expansion": "5.0.9",
+    "adm-zip": "0.6.1"
   },
   "bin": {
     "camofox-browser": "./bin/camofox-browser.js",
