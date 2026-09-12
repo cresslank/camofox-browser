@@ -60,6 +60,16 @@ describe('launch compatibility source contract', () => {
     expect(launch).toContain('headless: useVirtualDisplay ? false : !useDesktopWindow');
   });
 
+  test('caps native humanized pointer movement below the click deadline', () => {
+    const launch = sourceBetween(
+      'async function launchBrowserInstance(',
+      'async function ensureBrowser({'
+    );
+
+    expect(launch).toContain('humanize: 0.5');
+    expect(launch).not.toContain('humanize: true');
+  });
+
   test('falls back when optional GeoIP setup is unavailable', () => {
     const geoipFallback = sourceBetween(
       'function isCamoufoxGeoipError',

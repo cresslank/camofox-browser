@@ -1345,7 +1345,11 @@ async function launchBrowserInstance(launchToken) {
         executable_path: externalCamoufox?.executablePath,
         headless: useVirtualDisplay ? false : !useDesktopWindow,
         os: hostOS,
-        humanize: true,
+        // Camoufox's boolean humanization allows native pointer movement to
+        // consume about half of the click's 3s protocol deadline under load.
+        // Keep native humanized dispatch, but cap only movement at 0.5s so
+        // actionability and acknowledgement retain bounded headroom.
+        humanize: 0.5,
         enable_cache: true,
         proxy: launchProxy,
         geoip: !!launchProxy,

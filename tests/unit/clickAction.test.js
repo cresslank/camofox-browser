@@ -51,12 +51,15 @@ describe('dispatchClickOnce', () => {
       throw timeoutError();
     });
 
-    await expect(dispatchClickOnce({ locator, dispatch })).rejects.toMatchObject({
+    const error = await dispatchClickOnce({ locator, dispatch }).catch(caught => caught);
+    expect(error).toMatchObject({
       code: 'click_outcome_unknown',
       statusCode: 409,
       outcome: 'unknown',
       retryable: false,
     });
+    expect(error.message).toContain('may have been dispatched');
+    expect(error.message).not.toMatch(/click was dispatched/i);
     expect(sideEffects).toBe(1);
     expect(dispatch).toHaveBeenCalledTimes(1);
   });
