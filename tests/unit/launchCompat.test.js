@@ -60,14 +60,15 @@ describe('launch compatibility source contract', () => {
     expect(launch).toContain('headless: useVirtualDisplay ? false : !useDesktopWindow');
   });
 
-  test('caps native humanized pointer movement below the click deadline', () => {
+  test('disables the optional pointer interpolation layer below native dispatch', () => {
     const launch = sourceBetween(
       'async function launchBrowserInstance(',
       'async function ensureBrowser({'
     );
 
-    expect(launch).toContain('humanize: 0.5');
+    expect(launch).toContain('humanize: false');
     expect(launch).not.toContain('humanize: true');
+    expect(launch).not.toContain('humanize: 0.5');
   });
 
   test('falls back when optional GeoIP setup is unavailable', () => {

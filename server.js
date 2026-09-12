@@ -1345,11 +1345,11 @@ async function launchBrowserInstance(launchToken) {
         executable_path: externalCamoufox?.executablePath,
         headless: useVirtualDisplay ? false : !useDesktopWindow,
         os: hostOS,
-        // Camoufox's boolean humanization allows native pointer movement to
-        // consume about half of the click's 3s protocol deadline under load.
-        // Keep native humanized dispatch, but cap only movement at 0.5s so
-        // actionability and acknowledgement retain bounded headroom.
-        humanize: 0.5,
+        // Keep Playwright's single native pointer dispatch, but disable
+        // Camoufox's optional interpolation layer: under aggregate context
+        // churn it can stall inside "performing click action" until the
+        // protocol deadline even after actionability has completed.
+        humanize: false,
         enable_cache: true,
         proxy: launchProxy,
         geoip: !!launchProxy,
