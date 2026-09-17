@@ -5292,6 +5292,7 @@ app.get('/tabs/:tabId/links', async (req, res) => {
  *         description: Current resource is not a PDF.
  */
 app.post('/tabs/:tabId/fetch-current-resource', async (req, res) => {
+  let response;
   try {
     const userId = req.body?.userId;
     const session = sessions.get(normalizeUserId(userId));
@@ -5301,7 +5302,7 @@ app.post('/tabs/:tabId/fetch-current-resource', async (req, res) => {
     const url = tabState.page.url();
     if (!/^https?:\/\//i.test(url)) return res.status(400).json({ error: 'Current tab does not have an HTTP resource' });
 
-    const response = await tabState.page.context().request.get(url);
+    response = await tabState.page.context().request.get(url);
     const headers = response.headers();
     const mimeType = String(headers['content-type'] || '').split(';', 1)[0].toLowerCase();
     if (mimeType !== 'application/pdf') return res.status(415).json({ error: 'Current resource is not a PDF' });
@@ -5323,6 +5324,17 @@ app.post('/tabs/:tabId/fetch-current-resource', async (req, res) => {
     failuresTotal.labels(classifyError(err), 'fetch_current_resource').inc();
     log('error', 'fetch current resource failed', { reqId: req.reqId, error: err.message });
     handleRouteError(err, req, res);
+  } finally {
+    // APIRequestContext retains response bodies until explicitly disposed or the
+    // session closes. Release accepted and rejected responses alike. This is
+    // cleanup, not a streaming memory bound: request.get() already buffered it.
+    if (response) {
+      try {
+        await response.dispose();
+      } catch (err) {
+        log('warn', 'fetch current resource response cleanup failed', { reqId: req.reqId, error: err.message });
+      }
+    }
   }
 });
 
