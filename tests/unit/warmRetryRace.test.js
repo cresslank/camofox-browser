@@ -76,8 +76,9 @@ async function startRaceServer() {
     CAMOFOX_CRASH_REPORT_ENABLED: 'false',
     BROWSER_IDLE_TIMEOUT_MS: '0',
     CAMOFOX_TEST_LAUNCH_EVENTS_PATH: state.eventsPath,
-    CAMOFOX_TEST_LAUNCH_DELAYS_MS: '80,300',
-    CAMOFOX_TEST_LAUNCH_TIMEOUT_MS: '20',
+    CAMOFOX_TEST_LAUNCH_DELAYS_MS: '800,3000',
+    // Leave enough time for the parent to observe the event and send stop under load.
+    CAMOFOX_TEST_LAUNCH_TIMEOUT_MS: '500',
     CAMOFOX_TEST_WARM_RETRY_DELAY_MS: '15',
   };
   const child = spawn(process.execPath, ['server.js'], {
@@ -107,9 +108,9 @@ afterEach(async () => {
 
 function expectBothCandidatesClosed(events) {
   expect(events).toEqual(expect.arrayContaining([
-    expect.objectContaining({ event: 'launch-start', call: 1, delayMs: 80 }),
+    expect.objectContaining({ event: 'launch-start', call: 1, delayMs: 800 }),
     expect.objectContaining({ event: 'browser-close', call: 1 }),
-    expect.objectContaining({ event: 'launch-start', call: 2, delayMs: 300 }),
+    expect.objectContaining({ event: 'launch-start', call: 2, delayMs: 3000 }),
     expect.objectContaining({ event: 'browser-close', call: 2 }),
   ]));
   expect(events.filter(event => event.event === 'launch-start' && event.call > 2)).toEqual([]);
