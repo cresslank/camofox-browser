@@ -73,7 +73,8 @@ RUN if [ "${CAMOFOX_SKIP_BROWSER_DOWNLOAD}" = "1" ]; then \
 
 WORKDIR /app
 
-COPY package.json package-lock.json ./
+COPY package.json package-lock.json postinstall.js ./
+COPY lib/camoufox-download.js ./lib/camoufox-download.js
 COPY scripts/ ./scripts/
 # better-sqlite3 has no prebuild matching this node/arch, so npm ci falls back to
 # `node-gyp rebuild`, which fails on node:*-slim with "Error: not found: make".

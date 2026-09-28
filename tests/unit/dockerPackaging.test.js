@@ -16,6 +16,14 @@ const expectIgnoreLine = value => {
 describe.each(['Dockerfile', 'Dockerfile.ci'])('%s publication closure', dockerfile => {
   const source = readFileSync(new URL(dockerfile, root), 'utf8');
 
+  test('copies the complete postinstall module closure before npm ci', () => {
+    const install = source.indexOf('npm ci --omit=dev');
+    const beforeInstall = source.slice(0, install);
+    expect(install).toBeGreaterThan(0);
+    expect(beforeInstall).toContain('COPY package.json package-lock.json postinstall.js ./');
+    expect(beforeInstall).toContain('COPY lib/camoufox-download.js ./lib/camoufox-download.js');
+  });
+
   test('ships the committed OpenAPI and interactive docs assets', () => {
     expect(source).toMatch(/^COPY openapi\.json \.\/$/m);
     expect(source).toMatch(/^COPY docs\/ \.\/docs\/$/m);

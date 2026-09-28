@@ -70,7 +70,8 @@ RUN set -eux; \
 
 WORKDIR /app
 
-COPY package.json package-lock.json ./
+COPY package.json package-lock.json postinstall.js ./
+COPY lib/camoufox-download.js ./lib/camoufox-download.js
 COPY scripts/ ./scripts/
 # Build tools are needed when better-sqlite3 has no native prebuild for the target.
 # Trixie's glibc also supports the upstream arm64 prebuild at runtime.

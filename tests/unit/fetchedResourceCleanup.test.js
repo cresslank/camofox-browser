@@ -8,7 +8,7 @@ const routeEnd = source.indexOf('\n// Get captured downloads', routeStart);
 if (routeStart < 0 || routeEnd < 0) throw new Error('PDF route boundary not found');
 const route = source.slice(routeStart, routeEnd);
 
-function harness({ mimeType = 'application/pdf', declaredBytes = '4', body = Buffer.from('%PDF') } = {}) {
+function harness({ mimeType = 'application/pdf', declaredBytes = '4', body = Buffer.from('%PDF'), inline = null } = {}) {
   const response = {
     headers: () => ({ 'content-type': mimeType, 'content-length': declaredBytes }),
     body: jest.fn().mockResolvedValue(body),
@@ -26,6 +26,7 @@ function harness({ mimeType = 'application/pdf', declaredBytes = '4', body = Buf
     sessions: new Map([['test-user', session]]), normalizeUserId: value => value,
     findTab: () => ({ tabState }), tabNotFoundResponse: res => res.status(404).json({ error: 'not found' }),
     MAX_FETCHED_RESOURCE_BYTES: 16, captureFetchedResource: capture,
+    readInlinePdfResponse: jest.fn().mockResolvedValue(inline),
     failuresTotal: { labels: () => ({ inc() {} }) }, classifyError: () => 'unknown',
     log, handleRouteError: handleError,
   };
@@ -36,6 +37,25 @@ function harness({ mimeType = 'application/pdf', declaredBytes = '4', body = Buf
 }
 
 describe('current resource response cleanup', () => {
+  test('uses inline PDF bytes without acquiring a refetch response', async () => {
+    const body = Buffer.from('%PDF');
+    const h = harness({ inline: { body, mimeType: 'application/pdf' } });
+    await h.run();
+    expect(h.res.statusCode).toBe(200);
+    expect(h.capture).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ body }));
+    expect(h.get).not.toHaveBeenCalled();
+    expect(h.response.dispose).not.toHaveBeenCalled();
+  });
+  test.each([{ exceedsLimit: true }, { body: Buffer.alloc(17), mimeType: 'application/pdf' }])(
+    'rejects oversized inline PDFs without refetching: %j', async inline => {
+      const h = harness({ inline });
+      await h.run();
+      expect(h.res.statusCode).toBe(413);
+      expect(h.capture).not.toHaveBeenCalled();
+      expect(h.get).not.toHaveBeenCalled();
+      expect(h.response.dispose).not.toHaveBeenCalled();
+    },
+  );
   test('disposes after successfully saving a PDF', async () => {
     const h = harness();
     await h.run();
