@@ -1,0 +1,67 @@
+name: Hardened qualification
+
+on:
+  pull_request:
+    branches: [local-hardened]
+  push:
+    branches: [local-hardened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hardened-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  qualify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+      npm_config_ignore_scripts: 'true'
+      CAMOFOX_CRASH_REPORT_ENABLED: 'false'
+      # These suites use Jest's default reporter; no unpinned jest-junit install.
+      CI: ''
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: '26.9.0'
+          cache: npm
+      - uses: SocketDev/action@ba6de6cc0565af1f42295590380973573297e31f # v1.3.2
+        with:
+          mode: firewall-free
+          firewall-version: '1.15.4'
+      - name: Install locked dependencies through Socket Firewall
+        run: |
+          sfw npm ci --ignore-scripts
+          sfw npm ci --prefix mcp --ignore-scripts
+          sfw npm rebuild better-sqlite3 --ignore-scripts=false
+          node -e 'const D=require("better-sqlite3"); new D(":memory:").close()'
+      - name: Audit production closures and validate dependency trees
+        run: |
+          sfw npm audit --omit=dev
+          sfw npm audit --prefix mcp --omit=dev
+          sfw npm ls --omit=dev --all
+          sfw npm ls --prefix mcp --omit=dev --all
+      - name: Prepare browser and isolated test home
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          sfw npx --no-install playwright-core install-deps firefox
+          node lib/camoufox-download.js
+          mkdir -p "$RUNNER_TEMP/camofox-home/.cache" "$RUNNER_TEMP/camofox-tmp"
+          ln -s "$HOME/.cache/camoufox" "$RUNNER_TEMP/camofox-home/.cache/camoufox"
+      - name: Run unit, plugin, MCP and E2E suites
+        run: |
+          export HOME="$RUNNER_TEMP/camofox-home"
+          export TMPDIR="$RUNNER_TEMP/camofox-tmp"
+          unset BASH_ENV ENV
+          xvfb-run --auto-servernum sfw npm run test:unit
+          sfw npm run test:plugins
+          sfw npm run test:mcp
+          xvfb-run --auto-servernum sfw npm run test:e2e
+          git diff --exit-code
