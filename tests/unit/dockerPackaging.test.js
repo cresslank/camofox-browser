@@ -45,6 +45,17 @@ describe.each(['Dockerfile', 'Dockerfile.ci'])('%s publication closure', dockerf
   });
 });
 
+test.each([['amd64', 'x86_64'], ['arm64', 'arm64']])('Dockerfile maps %s without losing browser-free validation', (target, expected) => {
+  const source = readFileSync(new URL('Dockerfile', root), 'utf8');
+  const mapping = source.match(/RUN (case "\$\{TARGETARCH\}" in [\s\S]*?esac)/)[1];
+  const result = execFileSync('sh', ['-c', `${mapping}\nprintf '%s' "$CAMOUFOX_ARCH"`], {
+    env: { ...process.env, TARGETARCH: target }, encoding: 'utf8',
+  });
+  expect(result).toBe(expected);
+  expect(source).toContain('&& if [ "${CAMOFOX_SKIP_BROWSER_DOWNLOAD}" = "1" ]; then');
+  expect(source).toContain('-lin.${CAMOUFOX_ARCH}.zip');
+});
+
 test('recursively excludes ambient build, log, cache, editor, and OS artifacts', () => {
   for (const directory of [
     'node_modules', 'coverage', '.nyc_output', 'dist', 'build', 'out', 'target',

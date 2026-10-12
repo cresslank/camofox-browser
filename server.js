@@ -1760,6 +1760,15 @@ function getTabGroup(session, listItemId) {
   return group;
 }
 
+// Drop an emptied group only while its key still maps to it. A cleanup that
+// awaited page close can resume after another cleanup dropped the group and a
+// new tab registered a replacement group under the same key.
+function dropEmptyTabGroup(session, listItemId, group) {
+  if (group.size === 0 && session.tabGroups.get(listItemId) === group) {
+    session.tabGroups.delete(listItemId);
+  }
+}
+
 // Centralized error handler for route catch blocks.
 // Auto-destroys dead browser sessions and returns appropriate status codes.
 function isProxyError(err) {
@@ -1963,7 +1972,7 @@ async function destroyTimedOutTab(session, tabId, reason, userId) {
     log('warn', 'timed-out tab cleanup failed', { tabId, error: err.message });
   } finally {
     group.delete(tabId);
-    if (group.size === 0) session.tabGroups.delete(listItemId);
+    dropEmptyTabGroup(session, listItemId, group);
     const lock = tabLocks.get(tabId);
     if (lock) {
       lock.drain();
@@ -2000,7 +2009,7 @@ async function recycleOldestTab(session, reqId, userId) {
 
   await safePageClose(oldestTab.page);
   oldestGroup.delete(oldestTabId);
-  if (oldestGroup.size === 0) session.tabGroups.delete(oldestGroupKey);
+  dropEmptyTabGroup(session, oldestGroupKey, oldestGroup);
   const lock = tabLocks.get(oldestTabId);
   if (lock) { lock.drain(); tabLocks.delete(oldestTabId); }
   refreshTabLockQueueDepth();
@@ -3202,6 +3211,18 @@ app.post('/pressure/cleanup', async (req, res) => {
  *               $ref: '#/components/schemas/Error'
  */
 app.post('/tabs', async (req, res) => {
+  // The tab is registered before it navigates, and the route deadline can pass
+  // while navigation is still in flight. An error response carries no tabId, so
+  // the catch below attempts to discard any registered tab, and a registration
+  // completed after abandonment attempts its own cleanup.
+  let createdTabId = null;
+  let abandoned = false;
+  const discardCreatedTab = async () => {
+    if (!createdTabId) return;
+    const session = sessions.get(normalizeUserId(req.body.userId));
+    if (session) await destroyTimedOutTab(session, createdTabId, 'tab_create_failed', req.body.userId);
+    createdTabId = null;
+  };
   try {
     const { userId, sessionKey, listItemId, url, trace, blockedResourceTypes } = req.body;
     const blockedTypes = normalizeBlockedResourceTypes(blockedResourceTypes);
@@ -3253,7 +3274,7 @@ app.post('/tabs', async (req, res) => {
         blockedResourceTypes: blockedTypes,
       });
       session = createdPage.session;
-      const page = createdPage.page;
+      let page = createdPage.page;
       const lease = createdPage.lease;
       const group = getTabGroup(session, resolvedSessionKey);
 
@@ -3261,10 +3282,16 @@ app.post('/tabs', async (req, res) => {
       let tabState = createTabState(page, blockedTypes);
       attachDownloadListener(tabState, tabId, log, pluginEvents, userId);
       group.set(tabId, tabState);
+      createdTabId = tabId;
       releasePageLease(session, lease);
       attachPopupHandler(page, userId, resolvedSessionKey);
       refreshActiveTabsGauge();
-      
+      if (abandoned) {
+        // The route deadline passed during session or page creation.
+        await discardCreatedTab();
+        throw new Error('tab create abandoned after the route deadline');
+      }
+
       if (url) {
         const urlErr = validateUrl(url);
         if (urlErr) throw Object.assign(new Error(urlErr), { statusCode: 400 });
@@ -3274,6 +3301,8 @@ app.post('/tabs', async (req, res) => {
           tabState.lastNavigationHttpStatus = typeof navigationResponse?.status === 'function' ? navigationResponse.status() : null;
           recordNavSuccess(userId);
         } catch (navErr) {
+          // A page closed by discardCreatedTab is not a navigation verdict.
+          if (abandoned) throw navErr;
           if ((isProxyError(navErr) || isTimeoutError(navErr)) && proxyPool?.canRotateSessions) {
             log('warn', 'tab create navigate failed, retrying with fresh proxy', {
               reqId: req.reqId, tabId, error: navErr.message,
@@ -3293,12 +3322,18 @@ app.post('/tabs', async (req, res) => {
             const retryGroup = getTabGroup(session, resolvedSessionKey);
             const { page: retryPage, lease: retryLease } = retryCreatedPage;
             tabState = createTabState(retryPage, blockedTypes);
+            page = retryPage;
             tabState.lastRequestedUrl = url;
             attachDownloadListener(tabState, tabId, log, pluginEvents, userId);
             retryGroup.set(tabId, tabState);
+            createdTabId = tabId;
             releasePageLease(session, retryLease);
             attachPopupHandler(retryPage, userId, resolvedSessionKey);
             refreshActiveTabsGauge();
+            if (abandoned) {
+              await discardCreatedTab();
+              throw new Error('tab create abandoned after the route deadline');
+            }
             const navigationResponse = await withPageLoadDuration('open_url', () => navigatePage(retryPage, url));
             tabState.lastNavigationHttpStatus = typeof navigationResponse?.status === 'function' ? navigationResponse.status() : null;
             recordNavSuccess(userId);
@@ -3311,7 +3346,10 @@ app.post('/tabs', async (req, res) => {
         }
         tabState.visitedUrls.add(url);
       }
-      
+      // The route deadline passed during navigation and the catch below has
+      // begun discarding the tab, so do not announce it.
+      if (abandoned) throw new Error('tab create abandoned after the route deadline');
+
       pluginEvents.emit('tab:created', { userId, tabId, page, url: page.url() });
       log('info', 'tab created', { reqId: req.reqId, tabId, userId, sessionKey: resolvedSessionKey, url: page.url(), blockedResourceTypes: blockedTypes.join(',') || null });
       return {
@@ -3326,6 +3364,12 @@ app.post('/tabs', async (req, res) => {
     res.json(result);
   } catch (err) {
     log('error', 'tab create failed', { reqId: req.reqId, error: err.message });
+    abandoned = true;
+    try {
+      await discardCreatedTab();
+    } catch (cleanupErr) {
+      log('warn', 'tab create cleanup failed', { reqId: req.reqId, tabId: createdTabId, error: cleanupErr?.message ?? String(cleanupErr) });
+    }
     // SSL certificate errors on initial navigation — non-retriable
     const isSslError = err.message && (
       err.message.includes('SEC_ERROR') ||
@@ -5934,9 +5978,7 @@ app.delete('/tabs/:tabId', async (req, res) => {
       await safePageClose(found.tabState.page);
       found.group.delete(req.params.tabId);
       { const _l = tabLocks.get(req.params.tabId); if (_l) _l.drain(); tabLocks.delete(req.params.tabId); refreshTabLockQueueDepth(); }
-      if (found.group.size === 0) {
-        session.tabGroups.delete(found.listItemId);
-      }
+      dropEmptyTabGroup(session, found.listItemId, found.group);
       refreshActiveTabsGauge();
       log('info', 'tab closed', { reqId: req.reqId, tabId: req.params.tabId, userId });
     }
@@ -5999,8 +6041,10 @@ app.delete('/tabs/group/:listItemId', async (req, res) => {
           lock.drain();
           tabLocks.delete(tabId);
         }
+        group.delete(tabId);
       }
-      session.tabGroups.delete(req.params.listItemId);
+      // Do not remove a replacement group registered under the same key.
+      dropEmptyTabGroup(session, req.params.listItemId, group);
       refreshTabLockQueueDepth();
       refreshActiveTabsGauge();
       log('info', 'tab group closed', { reqId: req.reqId, listItemId: req.params.listItemId, userId });
