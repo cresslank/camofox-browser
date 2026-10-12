@@ -5,7 +5,7 @@
 // that accidentally reach outside the published package.
 
 import { execFile as execFileCallback } from 'node:child_process';
-import { access, mkdtemp, mkdir, rm } from 'node:fs/promises';
+import { access, mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -27,6 +27,8 @@ try {
 
   const installDir = join(testDir, 'install');
   await mkdir(installDir);
+  // Anchor npm here even when a parent of the temp directory has node_modules.
+  await writeFile(join(installDir, 'package.json'), JSON.stringify({ private: true }));
   await execFile('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund', tarball], {
     cwd: installDir,
   });
@@ -51,7 +53,8 @@ try {
   // The root package also exposes this MCP server as a bin. Its file allowlist
   // must include the manifest read by mcp/server.mjs at startup.
   const { stdout: rootPackOutput } = await execFile('npm', ['pack', '--dry-run', '--json'], { cwd: ROOT });
-  const [rootPack] = JSON.parse(rootPackOutput);
+  const rootPackResult = JSON.parse(rootPackOutput);
+  const rootPack = Array.isArray(rootPackResult) ? rootPackResult[0] : Object.values(rootPackResult)[0];
   if (!rootPack.files.some(({ path }) => path === 'mcp/package.json')) {
     throw new Error('root package is missing mcp/package.json required by its MCP bin');
   }
