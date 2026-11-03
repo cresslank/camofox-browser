@@ -1,5 +1,5 @@
-import { Camoufox, launchOptions } from 'camoufox-js';
-import { VirtualDisplay } from 'camoufox-js/dist/virtdisplay.js';
+import { launchOptions, VirtualDisplay } from 'camoufox';
+import { assertBundledCamoufoxInstalled, assertCamoufoxModelInstalled } from './lib/camoufox-download.js';
 import { firefox } from 'playwright-core';
 import express from 'express';
 import crypto from 'crypto';
@@ -786,23 +786,23 @@ function clearBrowserIdleTimer() {
 
 // Detects errors that retrying cannot recover from (e.g., Camoufox binary
 // missing because postinstall was skipped). The user must run
-// `npx camoufox-js fetch` and restart; looping on this wastes resources
+// `npx camoufox fetch` and restart; looping on this wastes resources
 // and buries the actionable error under noise.
 //
-// Sentinel: matches the human-readable message thrown by camoufox-js's
+// Sentinel: matches the human-readable message thrown by camoufox's
 // FileNotFoundError in dist/pkgman.js (Version.fromPath). FileNotFoundError
 // is not exported from the public API, so substring matching is the only
 // available hook. If the upstream message changes, this regex needs an
 // update; the dependency range in package.json controls exposure.
 function isFatalInstallError(err) {
-  return /Version information not found/i.test(err?.message || '');
+  return /Version information not found|is not installed|Legacy Camoufox cache|Expected Camoufox/i.test(err?.message || '');
 }
 
 function camoufoxInstallRemediation() {
   if (CONFIG.camoufoxExecutablePath) {
     return 'verify CAMOUFOX_EXECUTABLE points to a Camoufox bundle with properties.json, version.json, and fontconfig/';
   }
-  return 'run `npx camoufox-js fetch` then restart the server';
+  return 'run `npm run fetch-bin` with a separate official cache, then restart the server';
 }
 
 function scheduleBrowserWarmRetry(delayMs = BROWSER_WARM_RETRY_INITIAL_DELAY_MS) {
@@ -1257,12 +1257,14 @@ function _countActiveHandles() {
 const GEOIP_SETUP_TIMEOUT_MS = 10000;
 
 function isCamoufoxGeoipError(err) {
-  return /Invalid locale:|GeoLite|MaxMind|geolocation|public proxy IP address|GeoIP setup timed out/i.test(err?.message || String(err || ''));
+  return /Invalid locale:|GeoLite|MaxMind|geolocation|public proxy IP address|Failed to get IP address:|GeoIP setup timed out/i.test(err?.message || String(err || ''));
 }
 
 const virtualDisplayRegistry = createVirtualDisplayRegistry(() => new DefaultVirtualDisplay());
 
 async function buildLaunchOptionsWithGeoipFallback(baseOptions, attemptMeta) {
+  assertCamoufoxModelInstalled();
+  if (!baseOptions.executable_path) assertBundledCamoufoxInstalled();
   try {
     return await withTimeout(launchOptions(baseOptions), GEOIP_SETUP_TIMEOUT_MS, 'GeoIP setup');
   } catch (err) {
@@ -1367,7 +1369,9 @@ async function launchBrowserInstance(launchToken) {
         // protocol deadline even after actionability has completed.
         humanize: false,
         enable_cache: true,
-        proxy: launchProxy,
+        // Preserve managed popup creation from evaluate() with Firefox 158.
+        firefox_user_prefs: { 'dom.disable_open_during_load': false },
+        proxy: normalizePlaywrightProxy(launchProxy),
         geoip: !!launchProxy,
         locale: launchLocale({ hasProxy: !!proxyPool, directIdentity: CONFIG.directIdentity }),
         virtual_display: vdDisplay,
@@ -1382,7 +1386,6 @@ async function launchBrowserInstance(launchToken) {
             proxyServer: launchProxy?.server || null,
             proxySession: launchProxy?.sessionId || null,
           });
-      options.proxy = normalizePlaywrightProxy(options.proxy);
       // Playwright's launcher defaults handleSIGTERM/SIGINT/SIGHUP to true,
       // registering its own process signal handlers that send Browser.close
       // straight to Firefox over its debug transport the instant a signal

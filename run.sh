@@ -19,9 +19,9 @@ if [ ! -d "node_modules" ]; then
 fi
 
 # Check if camoufox browser is installed
-if ! npx camoufox-js --version &> /dev/null 2>&1; then
+if ! node --input-type=module -e "import { assertBundledCamoufoxInstalled } from './lib/camoufox-download.js'; assertBundledCamoufoxInstalled()" &> /dev/null 2>&1; then
     echo "Fetching Camoufox browser..."
-    npx camoufox-js fetch
+    node lib/camoufox-download.js || exit 1
 fi
 
 # Install nodemon globally if not available

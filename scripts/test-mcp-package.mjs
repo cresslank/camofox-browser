@@ -12,13 +12,19 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 const execFile = promisify(execFileCallback);
+// The hardened harness opts in without making a workstation security wrapper
+// a prerequisite for ordinary contributors or upstream CI.
+function runNpm(args, options) {
+  const guarded = process.env.CAMOFOX_TEST_USE_SFW === '1';
+  return execFile(guarded ? 'sfw' : 'npm', guarded ? ['npm', ...args] : args, options);
+}
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const MCP_DIR = join(ROOT, 'mcp');
 const testDir = await mkdtemp(join(tmpdir(), 'camofox-browser-mcp-package-'));
 let tarball;
 
 try {
-  const { stdout } = await execFile('npm', ['pack', '--json'], { cwd: MCP_DIR });
+  const { stdout } = await runNpm(['pack', '--json'], { cwd: MCP_DIR });
   const packResult = JSON.parse(stdout);
   const packed = Array.isArray(packResult) ? packResult[0] : Object.values(packResult)[0];
   if (!packed?.filename) throw new Error('npm pack did not report a tarball filename');
@@ -29,7 +35,7 @@ try {
   await mkdir(installDir);
   // Anchor npm here even when a parent of the temp directory has node_modules.
   await writeFile(join(installDir, 'package.json'), JSON.stringify({ private: true }));
-  await execFile('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund', tarball], {
+  await runNpm(['install', '--ignore-scripts', '--no-audit', '--no-fund', tarball], {
     cwd: installDir,
   });
 
@@ -52,7 +58,7 @@ try {
 
   // The root package also exposes this MCP server as a bin. Its file allowlist
   // must include the manifest read by mcp/server.mjs at startup.
-  const { stdout: rootPackOutput } = await execFile('npm', ['pack', '--dry-run', '--json'], { cwd: ROOT });
+  const { stdout: rootPackOutput } = await runNpm(['pack', '--dry-run', '--json'], { cwd: ROOT });
   const rootPackResult = JSON.parse(rootPackOutput);
   const rootPack = Array.isArray(rootPackResult) ? rootPackResult[0] : Object.values(rootPackResult)[0];
   if (!rootPack.files.some(({ path }) => path === 'mcp/package.json')) {

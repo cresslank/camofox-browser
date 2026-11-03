@@ -12,6 +12,11 @@ function sourceBetween(startMarker, endMarker) {
 }
 
 describe('launch compatibility source contract', () => {
+  test('normalizes proxy credentials once, before official launchOptions uses them', () => {
+    expect(serverSource).toContain('proxy: normalizePlaywrightProxy(launchProxy)');
+    expect(serverSource).not.toContain('options.proxy = normalizePlaywrightProxy(options.proxy)');
+    expect(serverSource).toContain("firefox_user_prefs: { 'dom.disable_open_during_load': false }");
+  });
 
   test('awaits virtual display display string before launch', () => {
     expect(serverSource).toMatch(/vdDisplay\s*=\s*await\s+localVirtualDisplay\.get\(\)/);
@@ -103,6 +108,7 @@ describe('launch compatibility source contract', () => {
 
     expect(geoipFallback).toMatch(/GeoLite\|MaxMind\|geolocation/);
     expect(geoipFallback).toContain('public proxy IP address');
+    expect(geoipFallback).toContain('Failed to get IP address:');
     expect(serverSource).toContain('GEOIP_SETUP_TIMEOUT_MS = 10000');
     expect(geoipFallback).toContain("withTimeout(launchOptions(baseOptions), GEOIP_SETUP_TIMEOUT_MS, 'GeoIP setup')");
     expect(geoipFallback).toContain('geoip: false');

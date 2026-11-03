@@ -20,6 +20,16 @@ describe('loadConfig', () => {
     expect(config.serverEnv.CAMOFOX_BIND_HOST).toBe('127.0.0.1');
   });
 
+  test('forwards official cache/model selection and disabled reporting to child servers', () => {
+    process.env.XDG_CACHE_HOME = '/isolated/cache';
+    process.env.CAMOUFOX_FPGEN_DATA = '/isolated/model';
+    process.env.CAMOFOX_CRASH_REPORT_ENABLED = 'false';
+    const config = loadConfig();
+    expect(config.serverEnv.XDG_CACHE_HOME).toBe('/isolated/cache');
+    expect(config.serverEnv.CAMOUFOX_FPGEN_DATA).toBe('/isolated/model');
+    expect(config.serverEnv.CAMOFOX_CRASH_REPORT_ENABLED).toBe('false');
+  });
+
   test('prefers CAMOUFOX_EXECUTABLE for external Camoufox executable', () => {
     process.env.CAMOUFOX_EXECUTABLE = '/nix/store/camoufox/bin/camoufox';
     process.env.CAMOUFOX_EXECUTABLE_PATH = '/ignored/camoufox';

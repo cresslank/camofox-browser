@@ -99,16 +99,16 @@ Or from source:
 git clone https://github.com/jo-inc/camofox-browser
 cd camofox-browser
 npm install
-npm start  # downloads Camoufox on first run (~300MB)
+npm start  # uses the browser fetched during installation
 ```
 
 Default port is `9377`. See [Environment Variables](#environment-variables) for all options.
 
-> **Note:** the postinstall script unsets `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD` for itself before fetching the Camoufox binary. Without that override, an exported `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1` (common when Playwright is configured to use system Chrome) would silently skip the binary download and crash the server at runtime.
+> **Browser cohort:** this branch pins official `camoufox@0.5.9`, `playwright-core@1.62.0`, and Camoufox `158.0.1-beta.41`. Run `npm run fetch-bin` explicitly after a script-disabled install. `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD` does not control the official downloader; use `CAMOFOX_SKIP_DOWNLOAD=1` or `--ignore-scripts` to skip the install hook.
 >
-> **External Camoufox executable:** set `CAMOUFOX_EXECUTABLE=/path/to/camoufox-bin` before `npm install` and when starting the server to skip the bundled download and launch that executable. Compatibility aliases are `CAMOUFOX_EXECUTABLE_PATH` and `CAMOFOX_EXECUTABLE_PATH`. This is useful for NixOS paths such as `/nix/store/.../camoufox-bin`; the executable must come from a Camoufox bundle that includes `properties.json`, `version.json`, and `fontconfig/`.
+> **Existing camoufox-js caches:** choose a separate cache before fetching. The official CLI removes legacy cache contents without `.0.5_FLAG`; Camofox's fetch hook and bundled launch path refuse these caches instead. Do not point a candidate at a deployed service cache. See [official runtime migration](docs/official-camoufox.md).
 >
-> **Air-gapped or custom binary management:** prefer `CAMOUFOX_EXECUTABLE` when you already have a Camoufox bundle. Otherwise disable the auto-fetch with `npm install --ignore-scripts` (skips lifecycle scripts for *every* dependency -- bluntest option) or, more surgically, `npm install --omit=optional` plus a manual `npx camoufox-js fetch` step against your mirror. Note that `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install` no longer skips the Camoufox download (the postinstall sanitizes the env locally); use `--ignore-scripts` or `CAMOUFOX_EXECUTABLE` for that.
+> **External executable / air-gapped use:** set `CAMOUFOX_EXECUTABLE=/path/to/camoufox-bin` for installation and startup (aliases: `CAMOUFOX_EXECUTABLE_PATH`, `CAMOFOX_EXECUTABLE_PATH`). Supply a complete compatible bundle including `properties.json`, `application.ini`, `version.json`, and `fontconfig/`, plus prefetched fingerprint data. macOS app bundles remain intact; external bundles no longer populate the legacy flat cache.
 
 ### Docker
 
@@ -736,7 +736,7 @@ The cookie import endpoint (`POST /sessions/:userId/cookies`) is gated behind `C
 
 ### Binary download
 
-The Camoufox browser engine (~300MB) is downloaded at `npm install` time by [`camoufox-js`](https://www.npmjs.com/package/camoufox-js), an npm package maintained by the [Camoufox project](https://camoufox.com). It downloads from [official GitHub releases](https://github.com/nicedayzhu/camoufox/releases) with integrity verification handled by `camoufox-js`. No custom download URLs, no URL shorteners, no raw IP addresses.
+The browser is fetched by the official [`camoufox`](https://www.npmjs.com/package/camoufox) launcher from [daijro/camoufox releases](https://github.com/daijro/camoufox/releases). The package pins `158.0.1-beta.41` and verifies the release asset SHA-256. Fetching also prepares GeoIP and the pinned fingerprint model. Browser archives are now approximately 1.3 GB on Linux; model data is additional. See [runtime paths and offline preparation](docs/official-camoufox.md).
 
 ### Telemetry
 
