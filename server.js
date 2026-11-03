@@ -1683,7 +1683,26 @@ async function getSession(userId, { trace = false } = {}) {
         log('info', 'session proxy assigned', { userId: key, proxy: sessionProxy.server });
       }
       await pluginEvents.emitAsync('session:creating', { userId: key, contextOptions });
-      const context = await b.newContext(contextOptions);
+      let context;
+      try {
+        context = await b.newContext(contextOptions);
+      } catch (error) {
+        if (!contextOptions.storageState) throw error;
+        // Playwright closes the partially restored context on failure. Retry
+        // once without state, preserving proxy/identity and all other options.
+        // Do not discard a profile on an unrelated browser-wide failure: first
+        // prove that a clean context can actually be created.
+        const { storageState, ...cleanOptions } = contextOptions;
+        context = await b.newContext(cleanOptions);
+        log('warn', 'storage state restore failed; using clean context', {
+          userId: key,
+          storageStatePath: typeof storageState === 'string' ? storageState : undefined,
+          reason: /IndexedDB/i.test(error.message) ? 'indexeddb_restore_failed' : 'storage_state_restore_failed',
+        });
+        await pluginEvents.emitAsync('session:restore:failed', { userId: key, storageState }).catch(() => {
+          log('warn', 'failed to discard unrestorable storage state', { userId: key });
+        });
+      }
 
       let tracePath = null;
       if (trace) {

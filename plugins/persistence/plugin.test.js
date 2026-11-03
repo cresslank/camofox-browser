@@ -54,6 +54,26 @@ describe('persistence plugin', () => {
     expect(contextOptions.storageState).toBe(storageStatePath);
   });
 
+  test('replacement creation joins the first healthy checkpoint after a restore failure', async () => {
+    await register(mockApp, ctx, { profileDir: tmpDir });
+    const { getUserPersistencePaths } = await import('../../lib/persistence.js');
+    const userId = 'recovered-closing-user';
+    const { storageStatePath } = getUserPersistencePaths(tmpDir, userId);
+    await events.emitAsync('session:restore:failed', { userId, storageState: storageStatePath });
+    const storageState = {
+      cookies: [{ name: 'sid', value: 'recovered-login', domain: '.example.com', path: '/' }],
+      origins: [],
+    };
+    // Export checkpoints use the real filesystem, with no context/browser mock.
+    // Start a new session while the previous snapshot is still being written.
+    const checkpoint = events.emitAsync('session:storage:export', { userId, storageState });
+    const contextOptions = {};
+    await events.emitAsync('session:creating', { userId, contextOptions });
+    await checkpoint;
+    expect(contextOptions.storageState).toBe(storageStatePath);
+    expect(JSON.parse(await fs.readFile(contextOptions.storageState, 'utf8'))).toEqual(storageState);
+  });
+
   test('checkpoints on session:cookies:import', async () => {
     await register(mockApp, ctx, { profileDir: tmpDir });
 
