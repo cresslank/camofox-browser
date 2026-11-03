@@ -1,5 +1,21 @@
 # persistence
 
+If restoring a saved snapshot fails, session creation retries once with a clean
+context (same proxy and browser identity). After the clean retry succeeds, the
+persistence plugin drops that user's entire rejected snapshot and metadata. The
+browser does not reliably identify which origin/record failed, so retaining a
+partially trusted snapshot or another sensitive quarantine copy would be unsafe.
+Other users' profiles are unchanged. Logs identify the snapshot path and failure
+category, never cookie values or raw browser errors. If deletion fails, restore
+stays suppressed in-process until a successful checkpoint replaces the snapshot.
+The fallback skips bootstrap-cookie import; normal persistence resumes on later
+checkpoints.
+
+Profile and per-user directories are restricted to 0700; snapshot/metadata files
+(including temporary writes) to 0600. Legacy permissions tighten on load.
+Persistence paths must belong to the service user and cannot themselves be links.
+
+
 Optional per-user browser storage state persistence for camofox-browser.
 
 Saves and restores cookies and localStorage across session restarts, container deploys, and idle timeouts using Playwright's `storageState` API. IndexedDB persistence is available as an opt-in.

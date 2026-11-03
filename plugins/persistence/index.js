@@ -72,6 +72,9 @@ export async function register(app, ctx, pluginConfig = {}) {
   const activeSessions = new Map(); // userId -> context
   const checkpointPromises = new Map(); // userId -> latest queued checkpoint
   const resettingUsers = new Set();
+  // Suppress retries even if disk removal fails; successful checkpoints replace
+  // the rejected snapshot and re-enable restoration.
+  const failedRestores = new Set();
 
   /**
    * Checkpoint storage state to disk for a userId.
@@ -91,6 +94,7 @@ export async function register(app, ctx, pluginConfig = {}) {
         indexedDB,
       });
       if (result.persisted) {
+        failedRestores.delete(userId);
         log('info', 'storage state persisted', { userId, reason, path: result.storageStatePath });
       }
       return result;
@@ -107,12 +111,26 @@ export async function register(app, ctx, pluginConfig = {}) {
 
   // Before session context is created: inject storageState if we have one saved
   events.on('session:creating', async ({ userId, contextOptions }) => {
-    if (resettingUsers.has(userId)) return;
+    // A closing session may still be writing the first healthy checkpoint
+    // after fallback. Join it before deciding whether restore is suppressed.
+    await checkpointPromises.get(userId)?.catch(() => {});
+    if (resettingUsers.has(userId) || failedRestores.has(userId)) return;
     const storageStatePath = await loadPersistedStorageState(profileDir, userId, logger);
     if (storageStatePath) {
       contextOptions.storageState = storageStatePath;
       log('info', 'restoring persisted storage state', { userId, storageStatePath });
     }
+  });
+
+  events.on('session:restore:failed', async ({ userId, storageState }) => {
+    const { storageStatePath, metaPath } = getUserPersistencePaths(profileDir, userId);
+    // Only discard the snapshot owned by this plugin, never another plugin's.
+    if (storageState !== storageStatePath) return;
+    await checkpointPromises.get(userId)?.catch(() => {});
+    failedRestores.add(userId);
+    await removeIfExists(storageStatePath);
+    await removeIfExists(metaPath);
+    log('warn', 'discarded unrestorable persisted storage state', { userId, storageStatePath });
   });
 
   // After session is created: import bootstrap cookies if no persisted state,
@@ -122,7 +140,7 @@ export async function register(app, ctx, pluginConfig = {}) {
 
     // If no persisted state was restored, try bootstrap cookies
     const existingState = await loadPersistedStorageState(profileDir, userId, logger);
-    if (!existingState) {
+    if (!existingState && !failedRestores.has(userId)) {
       const result = await importBootstrapCookies({
         cookiesDir: config.cookiesDir,
         context,
