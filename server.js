@@ -10,6 +10,7 @@ import { getSearchFallbacks } from './lib/search-fallbacks.js';
 import { hasGoogleOrganicResults } from './lib/google-serp.js';
 import { loadConfig } from './lib/config.js';
 import { contextIdentityOptions, launchLocale } from './lib/browser-identity.js';
+import { newContextWithStorage } from './lib/storage-restore.js';
 import { normalizePlaywrightProxy, createProxyPool, buildProxyUrl } from './lib/proxy.js';
 import { createFlyHelpers } from './lib/fly.js';
 import { createPluginEvents, loadPlugins, typeEventPayload } from './lib/plugins.js';
@@ -1688,9 +1689,9 @@ async function getSession(userId, { trace = false } = {}) {
       await pluginEvents.emitAsync('session:creating', { userId: key, contextOptions });
       let context;
       try {
-        context = await b.newContext(contextOptions);
+        context = await newContextWithStorage(b, contextOptions, log);
       } catch (error) {
-        if (!contextOptions.storageState) throw error;
+        if (error.preserveStorageState || !contextOptions.storageState) throw error;
         // Playwright closes the partially restored context on failure. Retry
         // once without state, preserving proxy/identity and all other options.
         // Do not discard a profile on an unrelated browser-wide failure: first
