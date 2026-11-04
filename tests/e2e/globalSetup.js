@@ -47,7 +47,10 @@ export default async function globalSetup() {
   const serverProcess = launchServer({
     pluginDir,
     port: serverPort,
-    env: { ...cfg.serverEnv, CAMOFOX_UPLOADS_DIR: uploadsDir, DEBUG_RESPONSES: 'false', DISPLAY },
+    // Make the server deadline win before Firefox 158's own stalled-channel
+    // abort. The slow-navigation fixture must exercise our timeout contract,
+    // not the browser's separate navigation-race (NS_ERROR_ABORT) classification.
+    env: { ...cfg.serverEnv, NAVIGATE_TIMEOUT_MS: '10000', CAMOFOX_UPLOADS_DIR: uploadsDir, DEBUG_RESPONSES: 'false', DISPLAY },
     log,
   });
 

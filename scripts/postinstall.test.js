@@ -75,20 +75,11 @@ describe('postinstall external executable handling', () => {
 });
 
 describe('postinstall downloader', () => {
-  test('uses camoufox-js without a package-owned child process', async () => {
-    const install = jest.fn().mockResolvedValue(undefined);
-    const downloadGeoIp = jest.fn();
-    const downloadAddons = jest.fn().mockResolvedValue(undefined);
-
-    await downloadBundledCamoufox({
-      createFetcher: () => ({ install }),
-      shouldDownloadGeoIp: true,
-      downloadGeoIp,
-      downloadAddons,
-    });
-
-    expect(install).toHaveBeenCalledTimes(1);
-    expect(downloadGeoIp).toHaveBeenCalledTimes(1);
-    expect(downloadAddons).toHaveBeenCalledTimes(1);
+  test('uses the official CLI and release pin', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'camofox-fetch-test-'));
+    tempDirs.push(dir);
+    const run = jest.fn().mockResolvedValue(undefined);
+    await downloadBundledCamoufox({ run, cacheDir: dir });
+    expect(run.mock.calls).toEqual([[['set', '--release']], [['fetch']]]);
   });
 });

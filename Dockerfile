@@ -2,12 +2,14 @@
 # linked against GLIBC_2.38, so on bookworm it loads and then dies at runtime with
 # "version `GLIBC_2.38' not found" the first time a tab is opened. amd64 is
 # unaffected because that prebuild targets an older glibc.
-FROM node:22-trixie-slim AS camofox-browser
+FROM node:22-trixie-slim@sha256:2117f713a417f3aff682ac8f5bc2ebbdf1beed51f36e67ab1e0fd3866b6d2d8f AS camofox-browser
 
 # Pinned Camoufox version for reproducible builds
 # Update these when upgrading Camoufox
-ARG CAMOUFOX_VERSION=152.0.4
-ARG CAMOUFOX_RELEASE=beta.28
+ARG CAMOUFOX_VERSION=158.0.1
+ARG CAMOUFOX_RELEASE=beta.41
+ARG CAMOUFOX_SHA256_AMD64=3f2eb1d0451fa58e45e43e55f5e6181565069791ae60c0574f0ceb1f01341c33
+ARG CAMOUFOX_SHA256_ARM64=60e25f6eb95e13d9ec655bc02913d51057e669cb31542e6ace9d2190ab5380af
 ARG TARGETARCH
 ARG CAMOFOX_SKIP_BROWSER_DOWNLOAD=0
 ARG YT_DLP_VERSION=2026.08.19
@@ -50,28 +52,32 @@ RUN apt-get update && apt-get install -y \
     python3-minimal \
     && rm -rf /var/lib/apt/lists/*
 
-# Pre-bake Camoufox browser binary into image (downloaded at build time)
-# Note: unzip returns exit code 1 for warnings (Unicode filenames), so we use || true and verify
-# -f so a 404 fails here instead of writing "Not Found" into the .zip: without it the
-# build dies three commands later on "unzip: cannot find zipfile directory", which
-# points at the archive rather than at the URL that was actually wrong. Note the Linux
-# BuildKit supplies TARGETARCH; map its names to Camoufox release asset names.
-RUN case "${TARGETARCH}" in \
-      amd64) CAMOUFOX_ARCH="x86_64" ;; \
-      arm64) CAMOUFOX_ARCH="arm64" ;; \
+# Exact archive digests: https://api.github.com/repos/daijro/camoufox/releases/tags/v158.0.1-beta.41
+# Keep the official launcher's versioned layout; a flat cache without .0.5_FLAG
+# is treated as legacy and deleted by camoufox 0.5.x before launch.
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+      amd64) CAMOUFOX_ARCH="x86_64"; CAMOUFOX_SHA256="${CAMOUFOX_SHA256_AMD64}" ;; \
+      arm64) CAMOUFOX_ARCH="arm64"; CAMOUFOX_SHA256="${CAMOUFOX_SHA256_ARM64}" ;; \
       *) echo "Unsupported architecture: ${TARGETARCH}" >&2; exit 1 ;; \
-    esac \
-    && if [ "${CAMOFOX_SKIP_BROWSER_DOWNLOAD}" = "1" ]; then \
+    esac; \
+    if [ "${CAMOFOX_SKIP_BROWSER_DOWNLOAD}" = "1" ]; then \
       echo "Skipping Camoufox download for browser-free image smoke"; \
     else \
-      mkdir -p /root/.cache/camoufox \
-      && curl -fL -o /tmp/camoufox.zip "https://github.com/daijro/camoufox/releases/download/v${CAMOUFOX_VERSION}-${CAMOUFOX_RELEASE}/camoufox-${CAMOUFOX_VERSION}-${CAMOUFOX_RELEASE}-lin.${CAMOUFOX_ARCH}.zip" \
-      && (unzip -q /tmp/camoufox.zip -d /root/.cache/camoufox || true) \
-      && rm /tmp/camoufox.zip \
-      && chmod -R 755 /root/.cache/camoufox \
-      && echo "{\"version\":\"${CAMOUFOX_VERSION}\",\"release\":\"${CAMOUFOX_RELEASE}\"}" > /root/.cache/camoufox/version.json \
-      && test -f /root/.cache/camoufox/camoufox-bin \
-      && echo "Camoufox installed successfully"; \
+      CAMOUFOX_RELATIVE="browsers/official/${CAMOUFOX_VERSION}-${CAMOUFOX_RELEASE}-$(printf '%.8s' "$CAMOUFOX_SHA256")"; \
+      CAMOUFOX_DIR="/root/.cache/camoufox/${CAMOUFOX_RELATIVE}"; \
+      mkdir -p "$CAMOUFOX_DIR" /root/.camoufox; \
+      curl -fSL -o /tmp/camoufox.zip "https://github.com/daijro/camoufox/releases/download/v${CAMOUFOX_VERSION}-${CAMOUFOX_RELEASE}/camoufox-${CAMOUFOX_VERSION}-${CAMOUFOX_RELEASE}-lin.${CAMOUFOX_ARCH}.zip"; \
+      printf '%s  %s\n' "$CAMOUFOX_SHA256" /tmp/camoufox.zip | sha256sum -c -; \
+      unzip -q /tmp/camoufox.zip -d "$CAMOUFOX_DIR" || [ "$?" -eq 1 ]; \
+      test -f "$CAMOUFOX_DIR/camoufox-bin"; \
+      printf '{"version":"%s","build":"%s","interface":1,"prerelease":false,"sha256":"%s"}\n' "$CAMOUFOX_VERSION" "$CAMOUFOX_RELEASE" "$CAMOUFOX_SHA256" > "$CAMOUFOX_DIR/version.json"; \
+      printf '{"active_version":"%s"}\n' "$CAMOUFOX_RELATIVE" > /root/.cache/camoufox/config.json; \
+      touch /root/.cache/camoufox/.0.5_FLAG; \
+      chmod -R 755 /root/.cache/camoufox; \
+      chmod 700 /root/.camoufox; \
+      rm /tmp/camoufox.zip; \
+      echo "Camoufox installed successfully"; \
     fi
 
 # yt-dlp is installed and verified by the enabled YouTube plugin hook below.
@@ -88,9 +94,17 @@ COPY scripts/ ./scripts/
 # one fails at build time on any Debian release, that one at runtime on bookworm.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential python3 \
-    && CAMOFOX_SKIP_DOWNLOAD=${CAMOFOX_SKIP_BROWSER_DOWNLOAD} npm ci --omit=dev \
+    && CAMOFOX_SKIP_DOWNLOAD=1 npm ci --omit=dev --ignore-scripts \
+    && npm rebuild better-sqlite3 --ignore-scripts=false \
     && apt-get purge -y --auto-remove build-essential \
     && rm -rf /var/lib/apt/lists/*
+
+# Approved explicit prefetch, not a lifecycle hook or first-launch download.
+# Import Camoufox's paths first so fpgen uses the same cache as the launcher;
+# fpgen-js verifies its pinned archive AND each member before extraction.
+RUN if [ "${CAMOFOX_SKIP_BROWSER_DOWNLOAD}" != "1" ]; then \
+      node --input-type=module -e "import { launchPath } from './node_modules/camoufox/dist/pkgman.js'; import { ensureModel } from 'fpgen-js'; launchPath(); await ensureModel();"; \
+    fi
 
 COPY server.js ./
 COPY camofox.config.json ./

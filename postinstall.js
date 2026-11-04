@@ -4,27 +4,15 @@
 // install the JavaScript package and fetch the browser later.
 
 import { accessSync, constants, existsSync, statSync } from 'node:fs';
-import { homedir, platform } from 'node:os';
-import { join } from 'node:path';
+import { platform } from 'node:os';
 import { pathToFileURL } from 'node:url';
-import { downloadBundledCamoufox } from './lib/camoufox-download.js';
+import { assertBundledCamoufoxInstalled, downloadBundledCamoufox } from './lib/camoufox-download.js';
 
 const EXTERNAL_EXECUTABLE_ENV_VARS = [
   'CAMOUFOX_EXECUTABLE',
   'CAMOUFOX_EXECUTABLE_PATH',
   'CAMOFOX_EXECUTABLE_PATH',
 ];
-
-function camoufoxCacheDir() {
-  const home = homedir();
-  const plat = platform();
-  if (plat === 'darwin') return join(home, 'Library', 'Caches', 'camoufox');
-  if (plat === 'win32') {
-    const base = process.env.LOCALAPPDATA || join(home, 'AppData', 'Local');
-    return join(base, 'camoufox', 'camoufox', 'Cache');
-  }
-  return join(process.env.XDG_CACHE_HOME || join(home, '.cache'), 'camoufox');
-}
 
 function warn(message) {
   process.stderr.write(`[camofox-browser] postinstall warning: ${message}\n`);
@@ -58,7 +46,7 @@ function assertExternalExecutable(path) {
   }
 }
 
-export async function main() {
+export async function main({ download = downloadBundledCamoufox, verify = assertBundledCamoufoxInstalled } = {}) {
   if (process.env.CAMOFOX_SKIP_DOWNLOAD === '1' || process.env.CAMOFOX_SKIP_DOWNLOAD === 'true') {
     process.stderr.write('[camofox-browser] postinstall: skipping binary download (CAMOFOX_SKIP_DOWNLOAD=1)\n');
     return;
@@ -73,21 +61,12 @@ export async function main() {
     return;
   }
 
-  const versionFile = join(camoufoxCacheDir(), 'version.json');
-  if (existsSync(versionFile)) {
-    process.stdout.write('[camofox-browser] postinstall: Camoufox binary already cached.\n');
-    return;
-  }
-
   try {
-    await downloadBundledCamoufox();
+    // A legacy root version.json is not evidence that this release is installed.
+    await download();
+    verify();
   } catch (error) {
     fail(`failed to download Camoufox: ${error instanceof Error ? error.message : String(error)}`);
-  }
-  if (!existsSync(versionFile)) {
-    warn('Camoufox cache not populated after fetch.');
-    warn(`  Expected file: ${versionFile}`);
-    warn('  Manual fix: npm run fetch-bin');
   }
 }
 

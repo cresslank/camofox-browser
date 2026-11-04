@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, test } from '@jest/globals';
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs';
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { getEnvVars } from 'camoufox/dist/utils.js';
+import { addDefaultAddons } from 'camoufox/dist/addons.js';
 import { dirname, join } from 'path';
 import { platform, tmpdir } from 'os';
 import { prepareExternalCamoufoxExecutable } from '../../lib/camoufox-executable.js';
@@ -20,7 +22,7 @@ afterEach(() => {
 });
 
 describe('prepareExternalCamoufoxExecutable', () => {
-  test('creates camoufox-js compatibility links for an external bundle', () => {
+  test('prepares an external bundle without polluting the browser cache', () => {
     const bundleDir = makeTempDir();
     const cacheDir = makeTempDir();
     const executable = join(bundleDir, 'camoufox-bin');
@@ -28,6 +30,7 @@ describe('prepareExternalCamoufoxExecutable', () => {
     writeFileSync(executable, '#!/bin/sh\nexit 0\n');
     chmodSync(executable, 0o755);
     writeFileSync(join(bundleDir, 'properties.json'), '[]\n');
+    writeFileSync(join(bundleDir, 'application.ini'), '[App]\nVersion=158.0.1\n');
     writeFileSync(join(bundleDir, 'version.json'), '{"version":"135.0.1","release":"beta.24"}\n');
     mkdirSync(join(bundleDir, 'fontconfig', 'lin'), { recursive: true });
 
@@ -36,13 +39,38 @@ describe('prepareExternalCamoufoxExecutable', () => {
     expect(prepared.resourceDir).toBe(bundleDir);
     expect(prepared.executablePath).toContain('camofox-browser-external-camoufox');
     expect(existsSync(prepared.executablePath)).toBe(true);
-    expect(existsSync(join(cacheDir, 'version.json'))).toBe(true);
-    expect(existsSync(join(cacheDir, 'fontconfig'))).toBe(true);
-    expect(existsSync(join(cacheDir, 'properties.json'))).toBe(true);
+    expect(existsSync(join(dirname(prepared.executablePath), 'application.ini'))).toBe(true);
+    expect(existsSync(join(cacheDir, 'version.json'))).toBe(false);
+    expect(existsSync(join(cacheDir, 'fontconfig'))).toBe(false);
+    expect(existsSync(join(cacheDir, 'properties.json'))).toBe(false);
     const cacheExecutable = platform() === 'darwin'
       ? join(cacheDir, 'Camoufox.app', 'Contents', 'MacOS', 'camoufox')
       : join(cacheDir, platform() === 'win32' ? 'camoufox.exe' : 'camoufox-bin');
-    expect(existsSync(cacheExecutable)).toBe(true);
+    expect(existsSync(cacheExecutable)).toBe(false);
+  });
+
+  test('official helpers resolve external fonts and UBO through the prepared path', () => {
+    if (platform() !== 'linux') return;
+    const bundle = makeTempDir();
+    const executable = join(bundle, 'camoufox-bin');
+    writeFileSync(executable, '#!/bin/sh\nexit 0\n');
+    chmodSync(executable, 0o755);
+    writeFileSync(join(bundle, 'properties.json'), '[]');
+    writeFileSync(join(bundle, 'application.ini'), '[App]\nVersion=158.0.1\n');
+    mkdirSync(join(bundle, 'fontconfig', 'linux'), { recursive: true });
+    mkdirSync(join(bundle, 'fonts', 'L'), { recursive: true });
+    mkdirSync(join(bundle, 'addons', 'UBO'), { recursive: true });
+    writeFileSync(join(bundle, 'addons', 'UBO', 'manifest.json'), '{"manifest_version":2,"name":"fixture","version":"1"}');
+    writeFileSync(join(bundle, 'fontconfig', 'linux', 'fonts.conf'), '<fontconfig><dir prefix="cwd">fonts</dir></fontconfig>');
+    writeFileSync(join(bundle, 'fonts', 'groups.json'), '{"readBy":{"lin":["L"]}}');
+    const prepared = prepareExternalCamoufoxExecutable(executable);
+    const env = getEnvVars({}, 'lin', prepared.executablePath);
+    const fonts = readFileSync(env.FONTCONFIG_FILE, 'utf8');
+    expect(fonts).toContain(join(dirname(prepared.executablePath), 'fonts', 'L'));
+    expect(existsSync(join(dirname(prepared.executablePath), 'fonts', 'L'))).toBe(true);
+    const addons = [];
+    addDefaultAddons(addons, undefined, prepared.executablePath);
+    expect(addons).toEqual([join(dirname(prepared.executablePath), 'addons', 'UBO')]);
   });
 
   test('preserves a macOS app bundle executable instead of flattening it', () => {
@@ -62,8 +90,8 @@ describe('prepareExternalCamoufoxExecutable', () => {
 
     expect(prepared.resourceDir).toBe(join(contents, 'Resources'));
     expect(prepared.executablePath).toBe(executable);
-    expect(existsSync(join(cacheDir, 'version.json'))).toBe(true);
-    expect(existsSync(join(dirname(executable), 'properties.json'))).toBe(true);
+    expect(existsSync(join(cacheDir, 'version.json'))).toBe(false);
+    expect(existsSync(join(dirname(executable), 'properties.json'))).toBe(false);
   });
 
   test('fails clearly when bundle resources are missing', () => {

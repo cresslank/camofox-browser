@@ -19,10 +19,10 @@
     Target architecture: x86_64 or aarch64 (default: x86_64).
 
 .PARAMETER CamoufoxVersion
-    Camoufox version (default: 135.0.1).
+    Camoufox version (default: 158.0.1).
 
 .PARAMETER CamoufoxRelease
-    Camoufox release channel (default: beta.24).
+    Camoufox release channel (default: beta.41).
 
 .PARAMETER ContainerName
     Docker container name (default: camofox-browser).
@@ -43,8 +43,11 @@ param(
     [ValidateSet('x86_64', 'aarch64')]
     [string]$Arch = 'x86_64',
 
-    [string]$CamoufoxVersion = '135.0.1',
-    [string]$CamoufoxRelease = 'beta.24',
+    [string]$CamoufoxVersion = '158.0.1',
+    [string]$CamoufoxRelease = 'beta.41',
+    [string]$CamoufoxSha256 = '',
+    [string]$YtDlpVersion = '2026.08.19',
+    [string]$YtDlpSha256 = '',
     [string]$ContainerName = 'camofox-browser',
     [int]$HostPort = 9377
 )
@@ -52,9 +55,6 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProjectRoot = Split-Path -Parent $PSCommandPath
 $DistDir = Join-Path $ProjectRoot 'dist'
-$CamoufoxZip = Join-Path $DistDir "camoufox-$Arch.zip"
-$YtDlpBin = Join-Path $DistDir "yt-dlp-$Arch"
-$ImageTag = "camofox-browser:$CamoufoxVersion-$Arch"
 $ContainerPort = 9377
 $SourceRevision = (& git -C $ProjectRoot rev-parse --verify 'HEAD^{commit}').Trim()
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($SourceRevision)) {
@@ -64,41 +64,64 @@ if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($SourceRevision)) {
 # Map architecture to upstream release filenames
 if ($Arch -eq 'aarch64') {
     $CamoufoxArch = 'arm64'
+    $DockerArch = 'arm64'
     $YtDlpSuffix = '_aarch64'
+    $PinnedCamoufoxSha256 = '60e25f6eb95e13d9ec655bc02913d51057e669cb31542e6ace9d2190ab5380af'
+    $PinnedYtDlpSha256 = 'b16e4dab368a816cd05d477d698a605a6ae87ccee1c8ffd38fa21d7254141fcc'
 } else {
     $CamoufoxArch = 'x86_64'
+    $DockerArch = 'amd64'
     $YtDlpSuffix = ''
+    $PinnedCamoufoxSha256 = '3f2eb1d0451fa58e45e43e55f5e6181565069791ae60c0574f0ceb1f01341c33'
+    $PinnedYtDlpSha256 = '58162f9bfdc27458ea47bfcb311cf47028f17d8154a8bf7d689861d46399230a'
 }
 
+# Archive pins: https://api.github.com/repos/daijro/camoufox/releases/tags/v158.0.1-beta.41
+if (-not $CamoufoxSha256) { $CamoufoxSha256 = $PinnedCamoufoxSha256 }
+if (-not $YtDlpSha256) { $YtDlpSha256 = $PinnedYtDlpSha256 }
+$CamoufoxZip = Join-Path $DistDir "camoufox-$CamoufoxVersion-$CamoufoxRelease-lin.$CamoufoxArch.zip"
+$YtDlpBin = Join-Path $DistDir "yt-dlp-$YtDlpVersion-$CamoufoxArch"
+$ImageTag = "camofox-browser:$CamoufoxVersion-$CamoufoxRelease-$CamoufoxArch"
+
 $CamoufoxUrl = "https://github.com/daijro/camoufox/releases/download/v$CamoufoxVersion-$CamoufoxRelease/camoufox-$CamoufoxVersion-$CamoufoxRelease-lin.$CamoufoxArch.zip"
-$YtDlpUrl = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux$YtDlpSuffix"
+$YtDlpUrl = "https://github.com/yt-dlp/yt-dlp/releases/download/$YtDlpVersion/yt-dlp_linux$YtDlpSuffix"
 
 function Write-Step {
     param([string]$Message)
     Write-Host ">>> $Message" -ForegroundColor Cyan
 }
 
+function Assert-Checksum {
+    param([string]$Path, [string]$Sha256)
+    if ($Sha256 -notmatch '^[a-fA-F0-9]{64}$') { throw "Invalid SHA256 for $Path" }
+    if ((Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash -ne $Sha256) {
+        throw "SHA256 mismatch for $Path"
+    }
+}
+
+function Get-VerifiedDownload {
+    param([string]$Url, [string]$Path, [string]$Sha256)
+    if (Test-Path -LiteralPath $Path) {
+        Assert-Checksum $Path $Sha256
+        Write-Host "  [VERIFIED] $Path"
+        return
+    }
+    $Partial = "$Path.partial"
+    try {
+        Write-Step "Downloading $Url"
+        curl.exe --fail --show-error --location --output $Partial $Url
+        if ($LASTEXITCODE -ne 0) { throw "Download failed: $Url (exit $LASTEXITCODE)" }
+        Assert-Checksum $Partial $Sha256
+        Move-Item -LiteralPath $Partial -Destination $Path
+    } finally {
+        if (Test-Path -LiteralPath $Partial) { Remove-Item -LiteralPath $Partial -Force }
+    }
+}
+
 function Invoke-Fetch {
-    Write-Step "Creating dist directory..."
     New-Item -ItemType Directory -Path $DistDir -Force | Out-Null
-
-    if (-not (Test-Path $CamoufoxZip)) {
-        Write-Step "Downloading Camoufox browser ($CamoufoxArch)..."
-        Write-Host "  URL: $CamoufoxUrl"
-        curl.exe -L -o $CamoufoxZip $CamoufoxUrl
-        Write-Host "  Downloaded: $(Get-Item $CamoufoxZip | Select-Object -ExpandProperty Length) bytes"
-    } else {
-        Write-Host "  [SKIP] Camoufox already downloaded"
-    }
-
-    if (-not (Test-Path $YtDlpBin)) {
-        Write-Step "Downloading yt-dlp ($Arch)..."
-        Write-Host "  URL: $YtDlpUrl"
-        curl.exe -L -o $YtDlpBin $YtDlpUrl
-        Write-Host "  Downloaded: $(Get-Item $YtDlpBin | Select-Object -ExpandProperty Length) bytes"
-    } else {
-        Write-Host "  [SKIP] yt-dlp already downloaded"
-    }
+    Get-VerifiedDownload $CamoufoxUrl $CamoufoxZip $CamoufoxSha256
+    Get-VerifiedDownload $YtDlpUrl $YtDlpBin $YtDlpSha256
 }
 
 function Invoke-Build {
@@ -106,13 +129,15 @@ function Invoke-Build {
 
     Write-Step "Building Docker image: $ImageTag"
     docker build `
-        --build-arg "ARCH=$Arch" `
+        --platform "linux/$DockerArch" `
         --build-arg "CAMOUFOX_VERSION=$CamoufoxVersion" `
         --build-arg "CAMOUFOX_RELEASE=$CamoufoxRelease" `
+        --build-arg "CAMOUFOX_SHA256_$($DockerArch.ToUpperInvariant())=$CamoufoxSha256" `
         --build-arg "SOURCE_REVISION=$SourceRevision" `
         -t $ImageTag `
         -f (Join-Path $ProjectRoot 'Dockerfile') `
         $ProjectRoot
+    if ($LASTEXITCODE -ne 0) { throw "Docker build failed (exit $LASTEXITCODE)" }
 }
 
 function Invoke-Up {
