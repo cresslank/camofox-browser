@@ -109,8 +109,9 @@ describe('launch compatibility source contract', () => {
     expect(geoipFallback).toMatch(/GeoLite\|MaxMind\|geolocation/);
     expect(geoipFallback).toContain('public proxy IP address');
     expect(geoipFallback).toContain('Failed to get IP address:');
-    expect(serverSource).toContain('GEOIP_SETUP_TIMEOUT_MS = 10000');
-    expect(geoipFallback).toContain("withTimeout(launchOptions(baseOptions), GEOIP_SETUP_TIMEOUT_MS, 'GeoIP setup')");
+    expect(serverSource).toContain('LAUNCH_OPTIONS_SETUP_TIMEOUT_MS = 30000');
+    expect(geoipFallback).toContain("withTimeout(launchOptions(baseOptions), LAUNCH_OPTIONS_SETUP_TIMEOUT_MS, 'Camoufox launch options')");
+    expect(geoipFallback).not.toContain('GeoIP setup timed out');
     expect(geoipFallback).toContain('geoip: false');
     expect(launchBrowser).toContain('buildLaunchOptionsWithGeoipFallback');
   });
