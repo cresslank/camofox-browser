@@ -1255,10 +1255,13 @@ function _countActiveHandles() {
   try { return process._getActiveHandles().length; } catch { return null; }
 }
 
-const GEOIP_SETUP_TIMEOUT_MS = 10000;
+// Official 0.5.9 also starts a Firefox subprocess here to read the host GPU.
+// This is not a GeoIP-only operation, even when geoip is false. Keep setup
+// below the enclosing 60s launch fence, with room for a cold native probe.
+const LAUNCH_OPTIONS_SETUP_TIMEOUT_MS = 30000;
 
 function isCamoufoxGeoipError(err) {
-  return /Invalid locale:|GeoLite|MaxMind|geolocation|public proxy IP address|Failed to get IP address:|GeoIP setup timed out/i.test(err?.message || String(err || ''));
+  return /Invalid locale:|GeoLite|MaxMind|geolocation|public proxy IP address|Failed to get IP address:/i.test(err?.message || String(err || ''));
 }
 
 const virtualDisplayRegistry = createVirtualDisplayRegistry(() => new DefaultVirtualDisplay());
@@ -1267,7 +1270,7 @@ async function buildLaunchOptionsWithGeoipFallback(baseOptions, attemptMeta) {
   assertCamoufoxModelInstalled();
   if (!baseOptions.executable_path) assertBundledCamoufoxInstalled();
   try {
-    return await withTimeout(launchOptions(baseOptions), GEOIP_SETUP_TIMEOUT_MS, 'GeoIP setup');
+    return await withTimeout(launchOptions(baseOptions), LAUNCH_OPTIONS_SETUP_TIMEOUT_MS, 'Camoufox launch options');
   } catch (err) {
     if (!baseOptions.geoip || !isCamoufoxGeoipError(err)) throw err;
     log('warn', 'camoufox geoip setup failed; retrying launch options without geoip', {
