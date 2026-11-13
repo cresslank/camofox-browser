@@ -16,12 +16,12 @@ const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 let root, profiles, fixture, child, base, origin;
 let output = '';
 
-async function request(method, route, body) {
+async function request(method, route, body, timeout = 45000) {
   const response = await fetch(base + route, {
     method,
     headers: { 'content-type': 'application/json' },
     body: body ? JSON.stringify(body) : undefined,
-    signal: AbortSignal.timeout(45000),
+    signal: AbortSignal.timeout(timeout),
   });
   const data = await response.json();
   expect({ status: response.status, data }).toMatchObject({ status: 200 });
@@ -66,7 +66,13 @@ beforeAll(async () => {
   const port = reservation.address().port;
   await new Promise(resolve => reservation.close(resolve));
   base = `http://127.0.0.1:${port}`;
-  child = spawn(process.execPath, ['server.js'], {
+  // Match a constrained deployment without changing clocks, restoration or the
+  // production 30-second tab deadline.
+  const cpu = process.platform === 'linux'
+    ? (await fs.readFile('/proc/self/status', 'utf8')).match(/Cpus_allowed_list:\s*(\d+)/)?.[1]
+    : null;
+  child = spawn(cpu ? 'taskset' : process.execPath, cpu
+    ? ['-c', cpu, process.execPath, 'server.js'] : ['server.js'], {
     cwd: repo,
     env: {
       ...process.env,
@@ -76,6 +82,7 @@ beforeAll(async () => {
       CAMOFOX_PROFILE_DIR: profiles, CAMOFOX_COOKIES_DIR: path.join(root, 'cookies'),
       CAMOFOX_UPLOADS_DIR: path.join(root, 'uploads'), CAMOFOX_TRACES_DIR: path.join(root, 'traces'),
       CAMOFOX_CRASH_REPORT_ENABLED: 'false', NODE_ENV: 'test',
+      BROWSER_PSS_RESTART_THRESHOLD_MB: '8192',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -117,6 +124,46 @@ describe('real HTTP persisted-profile recovery', () => {
     for (const dir of [profiles, paths.userDir]) expect((await fs.stat(dir)).mode & 0o777).toBe(0o700);
     for (const file of [paths.storageStatePath, paths.metaPath]) expect((await fs.stat(file)).mode & 0o777).toBe(0o600);
   });
+
+  test('393 retained origins prepare before the tab deadline and checkpoint losslessly', async () => {
+    const userId = 'large-retained-profile';
+    const state = {
+      cookies: Array.from({ length: 3925 }, (_, i) => ({
+        name: `cookie-${i}`, value: `fixture-${i}`, domain: `restore-${i % 392}.invalid`,
+        path: '/', expires: -1, httpOnly: false, secure: false, sameSite: 'Lax',
+      })),
+      origins: Array.from({ length: 393 }, (_, i) => ({
+        origin: i === 0 ? origin : `http://restore-${i}.invalid`,
+        localStorage: Array.from({ length: 3 }, (_, j) => ({
+          name: `saved-${j}`, value: `${i}-${j}:` + 'x'.repeat(2048),
+        })),
+      })),
+    };
+    const paths = await seed(userId, state);
+    const before = output.length;
+    const pending = request('POST', '/tabs', { userId, sessionKey: 'retained', url: origin }, 180000);
+    const deadline = Date.now() + 30000;
+    while (!output.slice(before).includes('restoring persisted storage state')) {
+      if (Date.now() > deadline) throw new Error('restoration did not start');
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    // Health remains responsive during the separate preparation phase, so
+    // listener/readiness probes need not wait for every persisted origin.
+    expect((await fetch(base + '/health', { signal: AbortSignal.timeout(5000) })).status).toBe(200);
+    const created = await pending;
+    expect(created.tabId).toEqual(expect.any(String));
+    expect(output.slice(before)).toContain('"restored":393');
+    expect(output.slice(before)).not.toContain('tab create timed out');
+    await request('DELETE', `/sessions/${userId}`, undefined, 180000);
+    const saved = JSON.parse(await fs.readFile(paths.storageStatePath, 'utf8'));
+    const ordered = data => ({
+      cookies: [...data.cookies].sort((a, b) => a.name.localeCompare(b.name)),
+      origins: [...data.origins].map(entry => ({
+        ...entry, localStorage: [...entry.localStorage].sort((a, b) => a.name.localeCompare(b.name)),
+      })).sort((a, b) => a.origin.localeCompare(b.origin)),
+    });
+    expect(ordered(saved)).toEqual(ordered(state));
+  }, 300000);
 
   test('IndexedDB restore failure serves a clean request, drops only the rejected snapshot and recovers durably', async () => {
     const userId = 'broken-profile';

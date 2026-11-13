@@ -406,7 +406,7 @@
           "Tabs"
         ],
         "summary": "Create a new tab",
-        "description": "Creates a tab in the given session. Optionally navigates to an initial URL.",
+        "description": "Creates a tab in the given session. Cold session restoration has its own bounded preparation phase before the unchanged tab-operation deadline begins. Optionally navigates to an initial URL.",
         "requestBody": {
           "required": true,
           "content": {

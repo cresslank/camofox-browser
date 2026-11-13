@@ -655,7 +655,8 @@ Browser behavior can be tuned in `camofox.config.json`:
 | `SESSION_TIMEOUT_MS` | Session inactivity timeout (0 = never) | `600000` (10min) |
 | `BROWSER_IDLE_TIMEOUT_MS` | Kill browser when idle (0 = never) | `300000` (5min) |
 | `CAMOFOX_INTERACTIVE` | Interactive browser mode: `desktop` opens a real local Camoufox window; `off` keeps normal headless behavior | `off` |
-| `HANDLER_TIMEOUT_MS` | Max time for any handler | `30000` (30s) |
+| `HANDLER_TIMEOUT_MS` | Tab-operation deadline, excluding cold session preparation | `30000` (30s) |
+| `SESSION_RESTORE_TIMEOUT_MS` | Bound for cold session preparation before a new tab accepts work; concurrent requests share the same restoration | `120000` (2min) |
 | `MAX_CONCURRENT_PER_USER` | Concurrent request cap per user | `3` |
 | `MAX_OLD_SPACE_SIZE` | Node.js V8 heap limit (MB) | `128` |
 | `PROXY_STRATEGY` | Proxy mode: `backconnect` (rotating sticky sessions) or blank (single endpoint) | - |

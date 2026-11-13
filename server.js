@@ -3160,7 +3160,7 @@ app.post('/pressure/cleanup', async (req, res) => {
  *   post:
  *     tags: [Tabs]
  *     summary: Create a new tab
- *     description: Creates a tab in the given session. Optionally navigates to an initial URL.
+ *     description: Creates a tab in the given session. Cold session restoration has its own bounded preparation phase before the unchanged tab-operation deadline begins. Optionally navigates to an initial URL.
  *     requestBody:
  *       required: true
  *       content:
@@ -3274,15 +3274,20 @@ app.post('/tabs', async (req, res) => {
       }
     }
 
+    const existing = sessions.get(normalizeUserId(userId));
+    if (trace && existing && !existing.tracePath) {
+      throw Object.assign(
+        new Error('trace must be set on session creation. DELETE /sessions/:userId first to restart with tracing.'),
+        { statusCode: 409 },
+      );
+    }
+    // Restoring a retained profile may visit hundreds of origins. It is session
+    // preparation, not tab work, and must finish before the tab deadline starts.
+    // getSession coalesces concurrent preparations for the same user.
+    let session = await withTimeout(getSession(userId, { trace: !!trace }),
+      CONFIG.sessionRestoreTimeoutMs, 'session restore');
+
     const result = await withTimeout((async () => {
-      const existing = sessions.get(normalizeUserId(userId));
-      if (trace && existing && !existing.tracePath) {
-        throw Object.assign(
-          new Error('trace must be set on session creation. DELETE /sessions/:userId first to restart with tracing.'),
-          { statusCode: 409 },
-        );
-      }
-      let session = await getSession(userId, { trace: !!trace });
       
       let totalTabs = 0;
       for (const group of session.tabGroups.values()) totalTabs += group.size;
