@@ -1,6 +1,9 @@
+import { jest } from '@jest/globals';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
+import { createServer } from 'node:net';
+import { once } from 'node:events';
 import { launchServer } from '../../lib/launcher.js';
 import { loadConfig } from '../../lib/config.js';
 
@@ -10,63 +13,56 @@ const TEST_API_KEY = 'test-cookie-key-' + crypto.randomUUID();
 let serverProcess = null;
 let serverUrl = null;
 
-async function startServerWithApiKey(apiKey) {
-  const port = Math.floor(3100 + Math.random() * 900);
+async function startServer(apiKey) {
+  const reservation = createServer();
+  reservation.listen(0, '127.0.0.1');
+  await once(reservation, 'listening');
+  const port = reservation.address().port;
+  await new Promise((resolve, reject) => reservation.close(error => error ? reject(error) : resolve()));
   const cfg = loadConfig();
-  const pluginDir = path.join(__dirname, '../..');
-
-  serverProcess = launchServer({
-    pluginDir,
-    port,
-    env: { ...cfg.serverEnv, CAMOFOX_API_KEY: apiKey, DEBUG_RESPONSES: 'false' },
-    log: { info: () => {}, error: (msg) => console.error(msg) },
-  });
-
-  for (let i = 0; i < 30; i++) {
-    await new Promise((r) => setTimeout(r, 500));
-    try {
-      const res = await fetch(`http://localhost:${port}/health`);
-      if (res.ok) {
-        serverUrl = `http://localhost:${port}`;
-        return;
-      }
-    } catch {}
-  }
-  throw new Error('Server failed to start');
-}
-
-async function startServerWithoutApiKey() {
-  const port = Math.floor(3100 + Math.random() * 900);
-  const cfg = loadConfig();
-  const pluginDir = path.join(__dirname, '../..');
-
   const env = { ...cfg.serverEnv, DEBUG_RESPONSES: 'false' };
-  delete env.CAMOFOX_API_KEY;
+  if (apiKey === undefined) delete env.CAMOFOX_API_KEY;
+  else env.CAMOFOX_API_KEY = apiKey;
 
+  let output = '';
+  let resolveReady, rejectReady;
+  const ready = new Promise((resolve, reject) => {
+    resolveReady = resolve;
+    rejectReady = reject;
+  });
+  const capture = msg => {
+    output += msg + '\n';
+    if (output.includes('"msg":"server started"')) resolveReady();
+  };
+  const timer = setTimeout(() => rejectReady(new Error('Server failed to start')), 15000);
   serverProcess = launchServer({
-    pluginDir,
+    pluginDir: path.join(__dirname, '../..'),
     port,
     env,
-    log: { info: () => {}, error: (msg) => console.error(msg) },
+    log: { info: capture, error: capture },
   });
-
-  for (let i = 0; i < 30; i++) {
-    await new Promise((r) => setTimeout(r, 500));
-    try {
-      const res = await fetch(`http://localhost:${port}/health`);
-      if (res.ok) {
-        serverUrl = `http://localhost:${port}`;
-        return;
-      }
-    } catch {}
+  const onExit = (code, signal) => rejectReady(new Error(`Server exited: ${code ?? signal}`));
+  const onError = error => rejectReady(error);
+  serverProcess.once('exit', onExit);
+  serverProcess.once('error', onError);
+  try {
+    await ready;
+    const res = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(5000) });
+    if (!res.ok) throw new Error(`Health returned HTTP ${res.status}`);
+    serverUrl = `http://127.0.0.1:${port}`;
+  } catch (error) {
+    throw new Error(`${error.message}${error.cause ? `: ${error.cause.message}` : ''}\n${output}`);
+  } finally {
+    clearTimeout(timer);
+    serverProcess.off('exit', onExit);
+    serverProcess.off('error', onError);
   }
-  throw new Error('Server failed to start');
 }
 
 function stopServer() {
   return new Promise((resolve) => {
     const proc = serverProcess;
-    if (!proc) return resolve();
+    if (!proc || proc.exitCode !== null || proc.signalCode !== null) return resolve();
     const killTimer = setTimeout(() => {
       if (!proc.killed) proc.kill('SIGKILL');
     }, 5000);
@@ -92,7 +88,7 @@ async function postCookies(userId, cookies, headers = {}) {
 
 describe('Cookie endpoint - field sanitization', () => {
   beforeAll(async () => {
-    await startServerWithApiKey(TEST_API_KEY);
+    await startServer(TEST_API_KEY);
   }, 120000);
 
   afterAll(async () => {
@@ -167,7 +163,7 @@ describe('Cookie endpoint - field sanitization', () => {
 
 describe('Cookie endpoint - with API key', () => {
   beforeAll(async () => {
-    await startServerWithApiKey(TEST_API_KEY);
+    await startServer(TEST_API_KEY);
   }, 120000);
 
   afterAll(async () => {
@@ -295,7 +291,13 @@ describe('Cookie endpoint - with API key', () => {
 
 describe('Cookie endpoint - without API key', () => {
   beforeAll(async () => {
-    await startServerWithoutApiKey();
+    // Regression: the old 3100–3999 sampler chooses Fetch-blocked port 3659.
+    const random = jest.spyOn(Math, 'random').mockReturnValue((3659 - 3100 + 0.5) / 900);
+    try {
+      await startServer();
+    } finally {
+      random.mockRestore();
+    }
   }, 120000);
 
   afterAll(async () => {
